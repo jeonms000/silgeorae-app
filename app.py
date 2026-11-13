@@ -15,6 +15,8 @@ DEFAULT_GU = "연제구"  # 처음 열 때 선택돼 있을 구
 TREND_MONTHS = 12      # 가격 변동 계산에 쓰는 기간(개월)
 REGION_PREFIX = "부산"  # 주소 검색에 붙일 시·도 이름
 KAKAO_KEY = st.secrets.get("KAKAO_KEY", "")  # 주변 시설 검색용 (없으면 그 칸만 숨김)
+SHEET_URL = st.secrets.get("SHEET_URL", "")  # 조건 저장용 구글 시트 주소 (없으면 저장 기능 숨김)
+APP_PASSWORD = st.secrets.get("APP_PASSWORD", "")  # 앱 비밀번호 (없으면 잠금 없음)
 
 URLS = {
     "매매": "https://apis.data.go.kr/1613000/RTMSDataSvcAptTradeDev/getRTMSDataSvcAptTradeDev",
@@ -183,25 +185,151 @@ def places(docs, n):
     return ", ".join(f"{d['place_name']} {dist(d['distance'])}" for d in docs[:n])
 
 
-# ── 입력 화면 ────────────────────────────────────────
+# ── 비밀번호 잠금 ────────────────────────────────────
 st.title("실거래가 시세 조회")
+if APP_PASSWORD and not st.session_state.get("authed"):
+    pw = st.text_input("비밀번호", type="password")
+    if pw == APP_PASSWORD:
+        st.session_state.authed = True
+        st.rerun()
+    elif pw:
+        st.error("비밀번호가 달라요.")
+    st.stop()
 st.caption("국토교통부 실거래가 공개 자료 기준, 참고용 시세입니다.")
 
+
+# ── 조건 저장하기 (구글 시트) ────────────────────────
+PRESET_COLS = ["이름", "구", "지역코드", "동", "거래종류", "예산", "월세최대",
+               "평수최소", "평수최대", "기간", "단지명", "저장일"]
+DEFAULTS = {"gu": DEFAULT_GU, "other_code": "", "dong_text": "", "choice": "전체",
+            "budget_text": "", "rent_max": 0, "pyeong": (0, 60), "months": 6, "apt_kw": ""}
+for k, v in DEFAULTS.items():
+    st.session_state.setdefault(k, v)
+
+
+@st.cache_resource(show_spinner=False)
+def sheet():
+    import gspread
+    gc = gspread.service_account_from_dict(dict(st.secrets["gcp_service_account"]))
+    book = gc.open_by_url(SHEET_URL)
+    try:
+        return book.worksheet("저장한 조건")
+    except gspread.WorksheetNotFound:
+        ws = book.add_worksheet("저장한 조건", rows=200, cols=len(PRESET_COLS))
+        ws.append_row(PRESET_COLS)
+        return ws
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_presets():
+    return sheet().get_all_records(numericise_ignore=["all"])
+
+
+def find_row(name):
+    names_col = sheet().col_values(1)
+    return names_col.index(name) + 1 if name in names_col[1:] else None
+
+
+def save_preset():
+    ss = st.session_state
+    name = ss.get("preset_name", "").strip()
+    if not name:
+        ss.preset_msg = ("warning", "저장할 이름을 적어 주세요.")
+        return
+    row = [name, ss.gu, ss.other_code, ss.dong_text, ss.choice, ss.budget_text,
+           ss.get("rent_max", 0), ss.pyeong[0], ss.pyeong[1], ss.months, ss.apt_kw,
+           dt.date.today().isoformat()]
+    row = [str(v) for v in row]
+    try:
+        r = find_row(name)
+        if r:
+            sheet().update(range_name=f"A{r}:L{r}", values=[row], value_input_option="RAW")
+        else:
+            sheet().append_row(row, value_input_option="RAW")
+        load_presets.clear()
+        ss.preset_msg = ("success", f"'{name}' 조건을 저장했어요.")
+    except Exception as e:
+        ss.preset_msg = ("error", f"저장하지 못했어요: {e}")
+
+
+def apply_preset():
+    ss = st.session_state
+    p = next((x for x in load_presets() if x["이름"] == ss.get("preset_pick")), None)
+    if not p:
+        return
+
+    def num(v, default):
+        try:
+            return int(float(v))
+        except (TypeError, ValueError):
+            return default
+
+    ss.gu = p["구"] if p["구"] in REGIONS else DEFAULT_GU
+    ss.other_code = p["지역코드"]
+    ss.dong_text = p["동"]
+    ss.choice = p["거래종류"] if p["거래종류"] in ("전체", "매매", "전세", "월세") else "전체"
+    ss.budget_text = p["예산"]
+    ss.rent_max = num(p["월세최대"], 0)
+    ss.pyeong = (num(p["평수최소"], 0), num(p["평수최대"], 60))
+    ss.months = min(max(num(p["기간"], 6), 1), 12)
+    ss.apt_kw = p["단지명"]
+    ss.searched = True
+    ss.preset_msg = ("success", f"'{p['이름']}' 조건을 불러왔어요.")
+
+
+def delete_preset():
+    ss = st.session_state
+    name = ss.get("preset_pick")
+    try:
+        r = find_row(name)
+        if r:
+            sheet().delete_rows(r)
+        load_presets.clear()
+        ss.preset_msg = ("success", f"'{name}' 조건을 지웠어요.")
+    except Exception as e:
+        ss.preset_msg = ("error", f"지우지 못했어요: {e}")
+
+
+if SHEET_URL:
+    with st.expander("저장한 조건"):
+        try:
+            presets = load_presets()
+        except Exception as e:
+            presets = []
+            st.error(f"저장 공간에 연결하지 못했어요: {e}")
+        if presets:
+            st.selectbox("불러올 조건", [p["이름"] for p in presets], key="preset_pick")
+            p1, p2 = st.columns(2)
+            p1.button("불러오기", on_click=apply_preset, type="primary")
+            p2.button("지우기", on_click=delete_preset)
+        else:
+            st.caption("아직 저장한 조건이 없어요.")
+        st.text_input("지금 조건을 저장할 이름", key="preset_name",
+                      placeholder="예: 김OO 손님 전세 (실명·전화번호는 적지 마세요)")
+        st.button("지금 조건 저장", on_click=save_preset)
+        st.caption("같은 이름으로 저장하면 덮어써요.")
+    msg = st.session_state.pop("preset_msg", None)
+    if msg:
+        getattr(st, msg[0])(msg[1])
+
+
+# ── 입력 화면 ────────────────────────────────────────
 gu_names = list(REGIONS)
-gu = st.selectbox("구", gu_names, index=gu_names.index(DEFAULT_GU))
+gu = st.selectbox("구", gu_names, key="gu")
 with st.expander("부산 외 지역"):
-    other_code = st.text_input("지역코드 5자리", placeholder="예: 48121 (창원시 의창구)")
+    other_code = st.text_input("지역코드 5자리", placeholder="예: 48121 (창원시 의창구)", key="other_code")
 lawd_cd = other_code.strip() or REGIONS[gu]
 
-dong_text = st.text_input("동 (선택, 여러 개는 띄어서)", placeholder="예: 연산동 거제동")
-choice = st.radio("거래 종류", ["전체", "매매", "전세", "월세"], horizontal=True)
-budget_text = st.text_input("예산 최대 (억, 선택)", placeholder="억 단위, 예: 4.5 (매매는 매매가, 전월세는 보증금 기준)")
+dong_text = st.text_input("동 (선택, 여러 개는 띄어서)", placeholder="예: 연산동 거제동", key="dong_text")
+choice = st.radio("거래 종류", ["전체", "매매", "전세", "월세"], horizontal=True, key="choice")
+budget_text = st.text_input("예산 최대 (억, 선택)", placeholder="억 단위, 예: 4.5 (매매는 매매가, 전월세는 보증금 기준)",
+                            key="budget_text")
 rent_max = 0
 if choice in ("월세", "전체"):
-    rent_max = st.number_input("월세 최대 (만원, 0이면 제한 없음)", min_value=0, step=10)
-pyeong = st.slider("전용면적 (평)", 0, 60, (0, 60))
-months = st.slider("기간 (최근 몇 개월)", 1, 12, 6)
-apt_kw = st.text_input("단지명 검색 (선택)", placeholder="예: 롯데캐슬")
+    rent_max = st.number_input("월세 최대 (만원, 0이면 제한 없음)", min_value=0, step=10, key="rent_max")
+pyeong = st.slider("전용면적 (평)", 0, 60, key="pyeong")
+months = st.slider("기간 (최근 몇 개월)", 1, 12, key="months")
+apt_kw = st.text_input("단지명 검색 (선택)", placeholder="예: 롯데캐슬", key="apt_kw")
 
 if st.button("조회하기", type="primary"):
     st.session_state.searched = True
@@ -554,12 +682,68 @@ def render_compare(bases):
                "전세 계약 전에 꼭 확인해 보세요. 상세 정보는 위쪽 매매·전세·월세 탭에서 볼 수 있어요.")
 
 
+# ── 우리 동네 최근 거래 ──────────────────────────────
+def signed_change(diff, kind):
+    if diff == 0:
+        return "±0"
+    if kind == "월세":
+        return f"{diff:+.0f}만"
+    text = f"{abs(diff) / 10000:.3f}".rstrip("0").rstrip(".")
+    return f"{'+' if diff > 0 else '-'}{text}억"
+
+
+def render_recent(bases):
+    days = st.radio("기간", [7, 14, 30], index=2, horizontal=True,
+                    format_func=lambda d: f"최근 {d}일", key="recent_days")
+    since = pd.Timestamp(dt.date.today()) - pd.Timedelta(days=days)
+    rows = []
+    for kind in ["매매", "전세", "월세"]:
+        base = bases.get(kind)
+        if base is None or base.empty:
+            continue
+        _, _, val_col = names(kind)
+        b = base.sort_values("계약일").copy()
+        g = b.groupby(["apt", "평형"])
+        b["직전값"] = g[val_col].shift(1)
+        b["직전일"] = g["계약일"].shift(1)
+        for _, r in b[b["계약일"] >= since].iterrows():
+            if pd.isna(r["직전값"]):
+                vs = "첫 거래"
+            else:
+                vs = f"{signed_change(r[val_col] - r['직전값'], kind)} (직전 {r['직전일']:%y.%m.%d})"
+            rows.append({
+                "계약일": r["계약일"],
+                "종류": kind,
+                "단지": r["apt"],
+                "평형": r["평형"],
+                "층": r["floor"],
+                "금액": fmt(kind, r["가격"], r["월세"]),
+                "직전 거래 대비": vs,
+                "구분": r["dealing"] if kind == "매매" else r["ctype"],
+            })
+    if not rows:
+        st.info(f"최근 {days}일 안에 계약된 거래가 아직 없어요. 신고가 늦게 들어오니 기간을 늘려 보세요.")
+        return
+    feed = pd.DataFrame(rows).sort_values("계약일", ascending=False)
+    feed["계약일"] = feed["계약일"].dt.strftime("%y.%m.%d")
+    counts = feed["종류"].value_counts()
+    st.subheader(f"최근 {days}일 계약 {len(feed)}건")
+    st.write(" / ".join(f"{k} {counts.get(k, 0)}건" for k in ["매매", "전세", "월세"]))
+    st.dataframe(feed, hide_index=True)
+    st.caption("계약일 기준으로 최근 거래를 모았어요. 실거래 자료에는 신고한 날짜가 없어서, "
+               "며칠 전 계약이 신고가 늦어 오늘 새로 나타날 수도 있어요. 자료는 6시간마다 새로 불러와요. "
+               "직전 거래 대비는 같은 단지·같은 평형·같은 종류의 바로 앞 거래와 비교한 값이에요 "
+               "(월세는 월세 금액 비교). 예산 조건은 적용하지 않고 동·단지·평수 조건만 적용해요.")
+
+
 # ── 화면 그리기 ──────────────────────────────────────
 if choice == "전체":
-    tabs = st.tabs(["한눈에 비교", "매매", "전세", "월세"])
+    tabs = st.tabs(["최근 거래", "한눈에 비교", "매매", "전세", "월세"])
     with tabs[0]:
+        render_recent(bases)
+    with tabs[1]:
         render_compare(bases)
-    for tab, kind in zip(tabs[1:], kinds):
+    for tab, kind in zip(tabs[2:], kinds):
         with tab:
             render(kind, bases[kind])
 else:
