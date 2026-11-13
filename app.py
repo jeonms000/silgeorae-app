@@ -177,6 +177,9 @@ with st.spinner("실거래가를 불러오는 중..."):
         st.stop()
 
 df = pd.DataFrame(rows)
+for k in FIELDS:  # 예전에 저장된 데이터에 없는 칸은 빈칸으로 채움
+    if k not in df:
+        df[k] = ""
 if df.empty:
     st.warning("이 지역, 이 기간에 신고된 거래가 없어요.")
     st.stop()
