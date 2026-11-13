@@ -188,8 +188,7 @@ rent_max = 0
 if kind == "월세":
     rent_max = st.number_input("월세 최대 (만원, 0이면 제한 없음)", min_value=0, step=10)
 pyeong = st.slider("전용면적 (평)", 0, 60, (0, 60))
-months = st.select_slider("기간", options=[3, 6, 12], value=6,
-                          format_func=lambda x: f"최근 {x}개월")
+months = st.slider("기간 (최근 몇 개월)", 1, 12, 6)
 apt_kw = st.text_input("단지명 검색 (선택)", placeholder="예: 롯데캐슬")
 
 if st.button("조회하기", type="primary"):
@@ -209,7 +208,7 @@ api_kind = "매매" if kind == "매매" else "전월세"
 rows = []
 with st.spinner("실거래가를 불러오는 중..."):
     try:
-        for ymd in recent_months(max(months, TREND_MONTHS)):
+        for ymd in recent_months(max(months + 1, TREND_MONTHS)):
             rows += fetch_month(api_kind, lawd_cd, ymd)
     except Exception as e:
         st.error(f"데이터를 불러오지 못했어요: {e}")
@@ -252,7 +251,7 @@ base = df.copy()
 val_col = "월세" if kind == "월세" else "가격"   # 월세는 월세 금액의 변동을 봄
 
 # 화면에 보여줄 거래는 고른 기간과 예산으로 한 번 더 거름
-df = df[df["계약일"] >= month_start(recent_months(months)[-1])]
+df = df[df["계약일"] >= pd.Timestamp(dt.date.today()) - pd.DateOffset(months=months)]  # 오늘부터 거꾸로 N개월
 if budget:
     df = df[df["가격"] <= budget]
 if rent_max:
