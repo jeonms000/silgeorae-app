@@ -210,7 +210,10 @@ for k, v in DEFAULTS.items():
 @st.cache_resource(show_spinner=False)
 def sheet():
     import gspread
-    gc = gspread.service_account_from_dict(dict(st.secrets["gcp_service_account"]))
+    info = dict(st.secrets["gcp_service_account"])
+    # 개인 키 줄바꿈이 글자 그대로(\\n) 들어간 경우도 읽을 수 있게 정리
+    info["private_key"] = info["private_key"].replace("\\n", "\n").strip() + "\n"
+    gc = gspread.service_account_from_dict(info)
     book = gc.open_by_url(SHEET_URL)
     try:
         return book.worksheet("저장한 조건")
@@ -223,6 +226,17 @@ def sheet():
 @st.cache_data(ttl=300, show_spinner=False)
 def load_presets():
     return sheet().get_all_records(numericise_ignore=["all"])
+
+
+def why(e):
+    """오류 종류까지 보여줘서 원인을 찾기 쉽게."""
+    name = type(e).__name__
+    if name == "SpreadsheetNotFound":
+        return ("시트를 찾지 못했어요. SHEET_URL 주소가 맞는지, 시트를 서비스 계정 이메일과 "
+                "편집자로 공유했는지 확인해 주세요.")
+    if name == "PermissionError" or "PERMISSION_DENIED" in str(e):
+        return "시트에 접근 권한이 없어요. 서비스 계정 이메일을 편집자로 공유했는지 확인해 주세요."
+    return f"{name}: {e}"
 
 
 def find_row(name):
@@ -249,7 +263,7 @@ def save_preset():
         load_presets.clear()
         ss.preset_msg = ("success", f"'{name}' 조건을 저장했어요.")
     except Exception as e:
-        ss.preset_msg = ("error", f"저장하지 못했어요: {e}")
+        ss.preset_msg = ("error", f"저장하지 못했어요: {why(e)}")
 
 
 def apply_preset():
@@ -287,7 +301,7 @@ def delete_preset():
         load_presets.clear()
         ss.preset_msg = ("success", f"'{name}' 조건을 지웠어요.")
     except Exception as e:
-        ss.preset_msg = ("error", f"지우지 못했어요: {e}")
+        ss.preset_msg = ("error", f"지우지 못했어요: {why(e)}")
 
 
 if SHEET_URL:
@@ -296,7 +310,7 @@ if SHEET_URL:
             presets = load_presets()
         except Exception as e:
             presets = []
-            st.error(f"저장 공간에 연결하지 못했어요: {e}")
+            st.error(f"저장 공간에 연결하지 못했어요: {why(e)}")
         if presets:
             st.selectbox("불러올 조건", [p["이름"] for p in presets], key="preset_pick")
             p1, p2 = st.columns(2)
