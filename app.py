@@ -1,6 +1,7 @@
 import datetime as dt
 import re
 import xml.etree.ElementTree as ET
+from urllib.parse import quote
 
 import pandas as pd
 import requests
@@ -12,6 +13,8 @@ st.set_page_config(page_title="실거래가 시세 조회", page_icon="🏠", la
 SERVICE_KEY = st.secrets["SERVICE_KEY"]  # .streamlit/secrets.toml 에서 읽음
 DEFAULT_GU = "연제구"  # 처음 열 때 선택돼 있을 구
 TREND_MONTHS = 12      # 가격 변동 계산에 쓰는 기간(개월)
+REGION_PREFIX = "부산"  # 주소 검색에 붙일 시·도 이름
+KAKAO_KEY = st.secrets.get("KAKAO_KEY", "")  # 주변 시설 검색용 (없으면 그 칸만 숨김)
 
 URLS = {
     "매매": "https://apis.data.go.kr/1613000/RTMSDataSvcAptTradeDev/getRTMSDataSvcAptTradeDev",
@@ -130,6 +133,42 @@ def fetch_month(kind, lawd_cd, ymd):
         if not items or page * 1000 >= total:
             return rows
         page += 1
+
+
+# ── 카카오 지도: 단지 위치와 주변 시설 ─────────────────
+@st.cache_data(ttl=60 * 60 * 24 * 7, show_spinner=False)  # 같은 검색은 7일 동안 저장
+def kakao(kind, **params):
+    r = requests.get(f"https://dapi.kakao.com/v2/local/search/{kind}.json",
+                     headers={"Authorization": f"KakaoAK {KAKAO_KEY}"}, params=params, timeout=10)
+    if r.status_code != 200:
+        raise RuntimeError(f"{r.status_code} {r.text[:150]}")
+    return r.json()
+
+
+def locate(address, keyword):
+    for kind, q in (("address", address), ("keyword", keyword)):
+        docs = kakao(kind, query=q).get("documents", [])
+        if docs:
+            return docs[0]["x"], docs[0]["y"]
+    return None
+
+
+def nearby(x, y, radius, code=None, query=None):
+    params = {"x": x, "y": y, "radius": radius, "sort": "distance"}
+    if code:
+        data = kakao("category", category_group_code=code, **params)
+    else:
+        data = kakao("keyword", query=query, **params)
+    return data.get("documents", []), data.get("meta", {}).get("total_count", 0)
+
+
+def dist(m):
+    m = int(m)
+    return f"{m}m" if m < 1000 else f"{m / 1000:.1f}km"
+
+
+def places(docs, n):
+    return ", ".join(f"{d['place_name']} {dist(d['distance'])}" for d in docs[:n])
 
 
 # ── 입력 화면 ────────────────────────────────────────
@@ -282,6 +321,34 @@ def fmt(v_price, v_rent=None):
     return text
 
 
+def show_nearby(dong, jibun, apt_name):
+    if not KAKAO_KEY:
+        return
+    area = REGION_PREFIX if other_code.strip() else f"{REGION_PREFIX} {gu}"
+    try:
+        loc = locate(f"{area} {dong} {jibun}", f"{area} {dong} {apt_name}")
+        if not loc:
+            st.caption("단지 위치를 찾지 못해 주변 시설을 표시하지 못했어요.")
+            return
+        x, y = loc
+        subway, _ = nearby(x, y, 2000, code="SW8")
+        bus, _ = nearby(x, y, 1000, query="버스정류장")
+        mart, _ = nearby(x, y, 3000, code="MT1")
+        _, n_cs = nearby(x, y, 500, code="CS2")
+        _, n_cafe = nearby(x, y, 500, code="CE7")
+    except Exception as e:
+        st.caption(f"주변 시설을 불러오지 못했어요: {e}")
+        return
+    lines = [
+        "지하철역: " + (places(subway, 2) or "2km 안에 없음"),
+        "버스정류장: " + (places(bus, 1) or "1km 안에 없음"),
+        "대형마트: " + (places(mart, 2) or "3km 안에 없음"),
+        f"500m 안 편의점 {n_cs}곳, 카페 {n_cafe}곳",
+    ]
+    st.markdown("**주변 시설** (단지에서 직선거리, 실제 걷는 거리는 더 길어요)")
+    st.markdown("\n".join(f"- {t}" for t in lines))
+
+
 def show_detail(apt_name, py):
     one = base[(base["apt"] == apt_name) & (base["평형"] == py)].sort_values("계약일", ascending=False)
     if one.empty:
@@ -296,6 +363,13 @@ def show_detail(apt_name, py):
     if age:
         info.insert(1, f"{by}년 준공, {age}년차")
     st.write(" / ".join(info))
+
+    q = f"{first['dong']} {apt_name}"
+    b1, b2 = st.columns(2)
+    b1.link_button("네이버 부동산 매물", "https://m.land.naver.com/search/result/" + quote(q))
+    b2.link_button("네이버 검색", "https://search.naver.com/search.naver?query=" + quote(q + " 아파트"))
+
+    show_nearby(first["dong"], first["jibun"], apt_name)
 
     c1, c2, c3 = st.columns(3)
     c1.metric("최근 거래", fmt(first["가격"], first.get("월세")))
