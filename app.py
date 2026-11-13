@@ -63,10 +63,13 @@ def to_num(s):
 
 
 def parse_money(text):
-    """'4억5천', '4억 5000', '45000' 을 만원 단위 숫자로 바꿉니다."""
+    """예산 입력을 만원 단위 숫자로 바꿉니다.
+    숫자만 적으면 억 단위로 읽음: '4.5' → 4.5억. '4억5천', '3000만'처럼 단위를 붙여도 됩니다.
+    (숫자만 1000 이상이면 예전처럼 만원 단위로 읽음: '45000' → 4.5억)"""
     s = re.sub(r"[,\s원]", "", text or "")
     if not s:
         return None
+    has_unit = any(u in s for u in "억천만")
     total = 0.0
     if "억" in s:
         a, s = s.split("억", 1)
@@ -75,7 +78,8 @@ def parse_money(text):
     if "천" in s:
         total += float(s.replace("천", "") or 0) * 1000
     elif s:
-        total += float(s)
+        n = float(s)
+        total += n if (has_unit or n >= 1000) else n * 10000
     return total or None
 
 
@@ -88,6 +92,14 @@ def money(v):
     if e:
         return f"{e}억"
     return f"{m:,}만"
+
+
+def eok(v):
+    """만원 단위 숫자를 억 단위로 (소수점 셋째 자리까지, 끝의 0은 뺌). 예: 47250 → 4.725억"""
+    if v is None or pd.isna(v):
+        return "-"
+    text = f"{v / 10000:.3f}".rstrip("0").rstrip(".")
+    return f"{text}억"
 
 
 def recent_months(n):
@@ -182,10 +194,10 @@ with st.expander("부산 외 지역"):
 lawd_cd = other_code.strip() or REGIONS[gu]
 
 dong_text = st.text_input("동 (선택, 여러 개는 띄어서)", placeholder="예: 연산동 거제동")
-kind = st.radio("거래 종류", ["매매", "전세", "월세"], horizontal=True)
-budget_text = st.text_input("예산 최대 (선택)", placeholder="매매가 또는 보증금, 예: 4억5천")
+choice = st.radio("거래 종류", ["전체", "매매", "전세", "월세"], horizontal=True)
+budget_text = st.text_input("예산 최대 (억, 선택)", placeholder="억 단위, 예: 4.5 (매매는 매매가, 전월세는 보증금 기준)")
 rent_max = 0
-if kind == "월세":
+if choice in ("월세", "전체"):
     rent_max = st.number_input("월세 최대 (만원, 0이면 제한 없음)", min_value=0, step=10)
 pyeong = st.slider("전용면적 (평)", 0, 60, (0, 60))
 months = st.slider("기간 (최근 몇 개월)", 1, 12, 6)
@@ -200,124 +212,112 @@ if not st.session_state.get("searched"):
 try:
     budget = parse_money(budget_text)
 except ValueError:
-    st.error("예산은 4억5천, 45000 처럼 적어 주세요.")
+    st.error("예산은 4.5 처럼 억 단위 숫자로 적어 주세요.")
     st.stop()
 
-# ── 데이터 불러오기 ──────────────────────────────────
-api_kind = "매매" if kind == "매매" else "전월세"
-rows = []
+
+# ── 데이터 불러오기와 정리 ─────────────────────────────
+def load(api_kind):
+    rows = []
+    for ymd in recent_months(max(months + 1, TREND_MONTHS)):
+        rows += fetch_month(api_kind, lawd_cd, ymd)
+    df = pd.DataFrame(rows)
+    for k in FIELDS:  # 예전에 저장된 데이터에 없는 칸은 빈칸으로 채움
+        if k not in df:
+            df[k] = ""
+    return df
+
+
+def clean(raw, kind):
+    """취소 거래를 빼고, 거래 종류와 동·단지·평수 조건으로 거른 12개월 치 거래."""
+    df = raw.copy()
+    df["평"] = (df["area"].map(to_num) / 3.3058).round(1)
+    df["계약일"] = pd.to_datetime(
+        df["year"] + "-" + df["month"].str.zfill(2) + "-" + df["day"].str.zfill(2),
+        errors="coerce",
+    )
+    df = df[df["cancel"].str.upper() != "O"].copy()
+    if kind == "매매":
+        df["가격"] = df["price"].map(to_num)
+        df["월세"] = 0.0
+    else:
+        df["가격"] = df["deposit"].map(to_num)
+        df["월세"] = df["rent"].map(to_num)
+        df = df[df["월세"] == 0] if kind == "전세" else df[df["월세"] > 0]
+    keys = dong_text.split()
+    if keys:
+        df = df[df["dong"].apply(lambda d: any(k in d for k in keys))]
+    if apt_kw.strip():
+        df = df[df["apt"].str.contains(apt_kw.strip(), regex=False)]
+    lo, hi = pyeong
+    df = df[(df["평"] >= lo) & (df["평"] <= (hi if hi < 60 else 1e9))].copy()
+    df["평형"] = df["평"].round().astype(int).astype(str) + "평"
+    return df
+
+
+def in_period(base, kind):
+    """고른 기간과 예산으로 한 번 더 거른 거래 (화면 표시용)."""
+    df = base[base["계약일"] >= pd.Timestamp(dt.date.today()) - pd.DateOffset(months=months)]
+    if budget:
+        df = df[df["가격"] <= budget]
+    if rent_max and kind == "월세":
+        df = df[df["월세"] <= rent_max]
+    return df
+
+
+kinds = ["매매", "전세", "월세"] if choice == "전체" else [choice]
+bases = {}
 with st.spinner("실거래가를 불러오는 중..."):
     try:
-        for ymd in recent_months(max(months + 1, TREND_MONTHS)):
-            rows += fetch_month(api_kind, lawd_cd, ymd)
+        raw = {}
+        if "매매" in kinds:
+            raw["매매"] = load("매매")
+        if "전세" in kinds or "월세" in kinds:
+            raw["전월세"] = load("전월세")
     except Exception as e:
         st.error(f"데이터를 불러오지 못했어요: {e}")
         st.stop()
-
-df = pd.DataFrame(rows)
-for k in FIELDS:  # 예전에 저장된 데이터에 없는 칸은 빈칸으로 채움
-    if k not in df:
-        df[k] = ""
-if df.empty:
-    st.warning("이 지역, 이 기간에 신고된 거래가 없어요.")
-    st.stop()
-
-# ── 정리와 필터 ──────────────────────────────────────
-df["평"] = (df["area"].map(to_num) / 3.3058).round(1)
-df["계약일"] = pd.to_datetime(
-    df["year"] + "-" + df["month"].str.zfill(2) + "-" + df["day"].str.zfill(2),
-    errors="coerce",
-)
-df = df[df["cancel"].str.upper() != "O"].copy()  # 해제(취소)된 거래 제외
-
-if kind == "매매":
-    df["가격"] = df["price"].map(to_num)
-else:
-    df["가격"] = df["deposit"].map(to_num)
-    df["월세"] = df["rent"].map(to_num)
-    df = df[df["월세"] == 0] if kind == "전세" else df[df["월세"] > 0]
-
-keys = dong_text.split()
-if keys:
-    df = df[df["dong"].apply(lambda d: any(k in d for k in keys))]
-if apt_kw.strip():
-    df = df[df["apt"].str.contains(apt_kw.strip(), regex=False)]
-lo, hi = pyeong
-df = df[(df["평"] >= lo) & (df["평"] <= (hi if hi < 60 else 1e9))]
-df["평형"] = df["평"].round().astype(int).astype(str) + "평"
-
-# 가격 변동은 예산과 상관없이 같은 단지·평형 전체 거래로 계산
-base = df.copy()
-val_col = "월세" if kind == "월세" else "가격"   # 월세는 월세 금액의 변동을 봄
-
-# 화면에 보여줄 거래는 고른 기간과 예산으로 한 번 더 거름
-df = df[df["계약일"] >= pd.Timestamp(dt.date.today()) - pd.DateOffset(months=months)]  # 오늘부터 거꾸로 N개월
-if budget:
-    df = df[df["가격"] <= budget]
-if rent_max:
-    df = df[df["월세"] <= rent_max]
-
-# ── 결과 ────────────────────────────────────────────
-st.subheader(f"조건에 맞는 거래 {len(df)}건")
-if df.empty:
-    st.warning("조건에 맞는 거래가 없어요. 예산이나 평수, 기간을 넓혀 보세요.")
-    st.stop()
-
-label = "매매가" if kind == "매매" else "보증금"
-c1, c2 = st.columns(2)
-c1.metric(f"{label} 중간값", money(df["가격"].median()))
-c2.metric("최저 ~ 최고", f"{money(df['가격'].min())} ~ {money(df['가격'].max())}")
-
-agg = {
-    "동": ("dong", "last"),
-    "거래수": ("가격", "size"),
-    "최근가": ("가격", "last"),
-    "최저": ("가격", "min"),
-    "최고": ("가격", "max"),
-    "최근계약": ("계약일", "last"),
-}
-if kind == "월세":
-    agg["최근월세"] = ("월세", "last")
-summary = (df.sort_values("계약일").groupby(["apt", "평형"]).agg(**agg)
-           .reset_index().sort_values("최근계약", ascending=False))
-for col in ["최근가", "최저", "최고"]:
-    summary[col] = summary[col].map(money)
-summary["최근계약"] = summary["최근계약"].dt.strftime("%y.%m.%d")
-if kind == "월세":
-    summary["최근월세"] = summary["최근월세"].map(lambda v: f"{int(v)}만")
-
-# ── 가격 변동: 최근 3개월 중간값 vs 그 이전(4~12개월 전) 중간값 ──
-recent_start = month_start(recent_months(3)[-1])
-new = base[base["계약일"] >= recent_start].groupby(["apt", "평형"])[val_col].agg(["median", "size"])
-old = base[base["계약일"] < recent_start].groupby(["apt", "평형"])[val_col].agg(["median", "size"])
-chg = new.join(old, lsuffix="_new", rsuffix="_old", how="inner")
+for k in kinds:
+    r = raw["매매" if k == "매매" else "전월세"]
+    bases[k] = clean(r, k) if not r.empty else pd.DataFrame()
 
 
-def change_text(r):
-    pct = (r["median_new"] / r["median_old"] - 1) * 100
-    mark = "▲" if pct > 0.5 else ("▼" if pct < -0.5 else "→")
-    note = " (거래 적음)" if min(r["size_new"], r["size_old"]) < 2 else ""
-    return f"{mark} {pct:+.1f}%{note}"
+# ── 공통 도우미 ──────────────────────────────────────
+def names(kind):
+    label = "매매가" if kind == "매매" else "보증금"
+    what = "월세" if kind == "월세" else label
+    val_col = "월세" if kind == "월세" else "가격"   # 월세는 월세 금액의 변동을 봄
+    return label, what, val_col
 
 
-chg["변동"] = chg.apply(change_text, axis=1) if not chg.empty else []
-summary = summary.merge(chg[["변동"]].reset_index(), on=["apt", "평형"], how="left")
-summary["변동"] = summary["변동"].fillna("-")
-summary = summary.rename(columns={"apt": "단지"})
-
-st.markdown("**단지·평형별 요약** (줄 왼쪽을 누르면 상세 정보)")
-event = st.dataframe(summary, hide_index=True, on_select="rerun", selection_mode="single-row")
-what = "월세" if kind == "월세" else label
-st.caption(f"변동: 최근 3개월 {what} 중간값을 그 이전 9개월 중간값과 비교한 값. "
-           "거래가 적으면 한두 건에 크게 흔들리니 참고만 하세요.")
+def won(v, kind):
+    """매매가·전세 보증금은 억 단위, 월세 보증금은 기존 표기(예: 1억 5,000)."""
+    return money(v) if kind == "월세" else eok(v)
 
 
-# ── 단지 상세 정보 ───────────────────────────────────
-def fmt(v_price, v_rent=None):
-    text = money(v_price)
-    if kind == "월세" and v_rent is not None:
-        text += f" / {int(v_rent)}만"
-    return text
+def amount(v, val_col):
+    return eok(v) if val_col == "가격" else f"{int(v)}만"
+
+
+def fmt(kind, price, rent):
+    return won(price, kind) + (f" / {int(rent)}만" if kind == "월세" else "")
+
+
+def change_table(base, val_col):
+    """최근 3개월 중간값 vs 그 이전(4~12개월 전) 중간값."""
+    start = month_start(recent_months(3)[-1])
+    new = base[base["계약일"] >= start].groupby(["apt", "평형"])[val_col].agg(["median", "size"])
+    old = base[base["계약일"] < start].groupby(["apt", "평형"])[val_col].agg(["median", "size"])
+    chg = new.join(old, lsuffix="_new", rsuffix="_old", how="inner")
+
+    def text(r):
+        pct = (r["median_new"] / r["median_old"] - 1) * 100
+        mark = "▲" if pct > 0.5 else ("▼" if pct < -0.5 else "→")
+        note = " (거래 적음)" if min(r["size_new"], r["size_old"]) < 2 else ""
+        return f"{mark} {pct:+.1f}%{note}"
+
+    chg["변동"] = chg.apply(text, axis=1) if not chg.empty else []
+    return chg
 
 
 def show_nearby(dong, jibun, apt_name):
@@ -348,13 +348,15 @@ def show_nearby(dong, jibun, apt_name):
     st.markdown("\n".join(f"- {t}" for t in lines))
 
 
-def show_detail(apt_name, py):
+# ── 단지 상세 정보 ───────────────────────────────────
+def show_detail(kind, base, chg, apt_name, py):
+    label, what, val_col = names(kind)
     one = base[(base["apt"] == apt_name) & (base["평형"] == py)].sort_values("계약일", ascending=False)
     if one.empty:
         st.warning("이 단지·평형의 최근 12개월 거래가 없어요.")
         return
     first = one.iloc[0]
-    st.markdown(f"### {apt_name} {py}")
+    st.markdown(f"### {apt_name} {py} ({kind})")
 
     by = int(to_num(first["build"]))
     age = dt.date.today().year - by + 1 if by else None
@@ -371,9 +373,9 @@ def show_detail(apt_name, py):
     show_nearby(first["dong"], first["jibun"], apt_name)
 
     c1, c2, c3 = st.columns(3)
-    c1.metric("최근 거래", fmt(first["가격"], first.get("월세")))
+    c1.metric("최근 거래", fmt(kind, first["가격"], first["월세"]))
     mid = one[val_col].median()
-    c2.metric(f"12개월 {what} 중간값", money(mid) if val_col == "가격" else f"{int(mid)}만")
+    c2.metric(f"12개월 {what} 중간값", amount(mid, val_col))
     c3.metric("3개월 변동", chg["변동"].get((apt_name, py), "-") if not chg.empty else "-")
 
     feats = []
@@ -419,22 +421,25 @@ def show_detail(apt_name, py):
             feats.append(f"{len(one)}건 중 {renew}건이 갱신 계약이에요. 갱신은 인상 폭이 제한돼 "
                          "신규 계약 시세보다 낮게 잡히는 편이에요.")
         if renew and len(new_c):
-            m = new_c[val_col].median()
             feats.append(f"신규 계약 {len(new_c)}건만 보면 {what} 중간값은 "
-                         f"{money(m) if val_col == '가격' else f'{int(m)}만'}이에요.")
+                         f"{amount(new_c[val_col].median(), val_col)}이에요.")
 
     st.markdown("**특징**")
     st.markdown("\n".join(f"- {f}" for f in feats))
 
     one = one.copy()
     one["월"] = one["계약일"].dt.to_period("M").dt.to_timestamp()
-    st.markdown(f"**월별 {what} 흐름** (최근 {TREND_MONTHS}개월 중간값, 만원)")
-    st.line_chart(one.groupby("월")[val_col].median().rename(what))
+    unit = "억" if val_col == "가격" else "만원"
+    monthly = one.groupby("월")[val_col].median()
+    if val_col == "가격":
+        monthly = (monthly / 10000).round(3)
+    st.markdown(f"**월별 {what} 흐름** (최근 {TREND_MONTHS}개월 중간값, {unit})")
+    st.line_chart(monthly.rename(f"{what} ({unit})"))
 
     t = pd.DataFrame({
         "계약일": one["계약일"].dt.strftime("%y.%m.%d"),
         "층": one["floor"],
-        label: one["가격"].map(money),
+        label: one["가격"].map(lambda v: won(v, kind)),
     })
     if kind == "월세":
         t["월세"] = one["월세"].map(lambda v: f"{int(v)}만")
@@ -444,21 +449,121 @@ def show_detail(apt_name, py):
     st.caption("실거래 자료로 계산한 내용이에요. 역세권, 학군, 향 같은 정보는 실거래 자료에 없어서 넣지 않았어요.")
 
 
-if event.selection.rows:
-    sel = summary.iloc[event.selection.rows[0]]
-    show_detail(sel["단지"], sel["평형"])
-else:
-    st.info("요약표에서 단지 줄 왼쪽 칸을 누르면 그 단지의 상세 정보와 특징이 나와요.")
+# ── 거래 종류 하나의 결과 화면 ───────────────────────
+def render(kind, base):
+    label, what, val_col = names(kind)
+    df = in_period(base, kind) if not base.empty else base
+    st.subheader(f"{kind}: 조건에 맞는 거래 {len(df)}건")
+    if df.empty:
+        st.warning("조건에 맞는 거래가 없어요. 예산이나 평수, 기간을 넓혀 보세요.")
+        return
 
-with st.expander("개별 거래 전체 보기"):
-    cols = ["계약일", "apt", "dong", "평", "floor", "가격"] + (["월세"] if kind == "월세" else [])
-    detail = df.sort_values("계약일", ascending=False)[cols].copy()
-    detail["계약일"] = detail["계약일"].dt.strftime("%y.%m.%d")
-    detail["가격"] = detail["가격"].map(money)
+    c1, c2 = st.columns(2)
+    c1.metric(f"{label} 중간값", won(df["가격"].median(), kind))
+    c2.metric("최저 ~ 최고", f"{won(df['가격'].min(), kind)} ~ {won(df['가격'].max(), kind)}")
+
+    agg = {
+        "동": ("dong", "last"),
+        "거래수": ("가격", "size"),
+        "최근가": ("가격", "last"),
+        "최저": ("가격", "min"),
+        "최고": ("가격", "max"),
+        "최근계약": ("계약일", "last"),
+    }
     if kind == "월세":
-        detail["월세"] = detail["월세"].map(lambda v: f"{int(v)}만")
-    detail = detail.rename(columns={"apt": "단지", "dong": "동", "floor": "층", "가격": label})
-    st.dataframe(detail, hide_index=True)
+        agg["최근월세"] = ("월세", "last")
+    summary = (df.sort_values("계약일").groupby(["apt", "평형"]).agg(**agg)
+               .reset_index().sort_values("최근계약", ascending=False))
+    for col in ["최근가", "최저", "최고"]:
+        summary[col] = summary[col].map(lambda v: won(v, kind))
+    summary["최근계약"] = summary["최근계약"].dt.strftime("%y.%m.%d")
+    if kind == "월세":
+        summary["최근월세"] = summary["최근월세"].map(lambda v: f"{int(v)}만")
+
+    chg = change_table(base, val_col)
+    summary = summary.merge(chg[["변동"]].reset_index(), on=["apt", "평형"], how="left")
+    summary["변동"] = summary["변동"].fillna("-")
+    summary = summary.rename(columns={"apt": "단지"})
+
+    st.markdown("**단지·평형별 요약** (줄 왼쪽을 누르면 상세 정보)")
+    event = st.dataframe(summary, hide_index=True, on_select="rerun",
+                         selection_mode="single-row", key=f"summary_{kind}")
+    st.caption(f"변동: 최근 3개월 {what} 중간값을 그 이전 9개월 중간값과 비교한 값. "
+               "거래가 적으면 한두 건에 크게 흔들리니 참고만 하세요.")
+
+    if event.selection.rows:
+        sel = summary.iloc[event.selection.rows[0]]
+        show_detail(kind, base, chg, sel["단지"], sel["평형"])
+    else:
+        st.info("요약표에서 단지 줄 왼쪽 칸을 누르면 그 단지의 상세 정보와 특징이 나와요.")
+
+    with st.expander("개별 거래 전체 보기"):
+        cols = ["계약일", "apt", "dong", "평", "floor", "가격"] + (["월세"] if kind == "월세" else [])
+        detail = df.sort_values("계약일", ascending=False)[cols].copy()
+        detail["계약일"] = detail["계약일"].dt.strftime("%y.%m.%d")
+        detail["가격"] = detail["가격"].map(lambda v: won(v, kind))
+        if kind == "월세":
+            detail["월세"] = detail["월세"].map(lambda v: f"{int(v)}만")
+        detail = detail.rename(columns={"apt": "단지", "dong": "동", "floor": "층", "가격": label})
+        st.dataframe(detail, hide_index=True)
+
+
+# ── 세 가지 한눈에 비교 ──────────────────────────────
+def render_compare(bases):
+    parts = []
+    for kind in ["매매", "전세", "월세"]:
+        base = bases[kind]
+        if base.empty:
+            continue
+        df = in_period(base, kind).sort_values("계약일")
+        if df.empty:
+            continue
+        g = df.groupby(["apt", "평형"])
+        last = g.last()
+        part = pd.DataFrame({
+            f"{kind} 최근가": [fmt(kind, p, r) for p, r in zip(last["가격"], last["월세"])],
+            f"{kind} 건수": g.size(),
+        }, index=last.index)
+        parts.append(part)
+    if not parts:
+        st.warning("조건에 맞는 거래가 없어요. 예산이나 평수, 기간을 넓혀 보세요.")
+        return
+    table = pd.concat(parts, axis=1)
+    for kind in ["매매", "전세", "월세"]:
+        if f"{kind} 건수" not in table:
+            table[f"{kind} 최근가"], table[f"{kind} 건수"] = "-", 0
+    table = table.fillna({"매매 최근가": "-", "전세 최근가": "-", "월세 최근가": "-"})
+    for kind in ["매매", "전세", "월세"]:
+        table[f"{kind} 건수"] = table[f"{kind} 건수"].fillna(0).astype(int)
+
+    # 전세가율: 12개월 전세 중간값 ÷ 12개월 매매 중간값
+    sale = bases["매매"].groupby(["apt", "평형"])["가격"].median() if not bases["매매"].empty else pd.Series(dtype=float)
+    jeonse = bases["전세"].groupby(["apt", "평형"])["가격"].median() if not bases["전세"].empty else pd.Series(dtype=float)
+    ratio = (jeonse / sale * 100).reindex(table.index)
+    table["전세가율"] = ratio.map(lambda v: "-" if pd.isna(v) else f"{v:.0f}%")
+
+    table["총 거래"] = table[["매매 건수", "전세 건수", "월세 건수"]].sum(axis=1)
+    table = table.sort_values("총 거래", ascending=False).reset_index()
+    table = table.rename(columns={"apt": "단지"})
+    cols = ["단지", "평형", "매매 최근가", "전세 최근가", "월세 최근가", "전세가율",
+            "매매 건수", "전세 건수", "월세 건수"]
+    st.subheader(f"단지·평형 {len(table)}곳 한눈에 비교")
+    st.dataframe(table[cols], hide_index=True)
+    st.caption("월세 최근가는 보증금 / 월세. 전세가율은 최근 12개월 전세 중간값을 매매 중간값으로 나눈 비율이에요. "
+               "전세가율이 높을수록 매매가가 내려갈 때 보증금을 돌려받기 어려워질 수 있어, "
+               "전세 계약 전에 꼭 확인해 보세요. 상세 정보는 위쪽 매매·전세·월세 탭에서 볼 수 있어요.")
+
+
+# ── 화면 그리기 ──────────────────────────────────────
+if choice == "전체":
+    tabs = st.tabs(["한눈에 비교", "매매", "전세", "월세"])
+    with tabs[0]:
+        render_compare(bases)
+    for tab, kind in zip(tabs[1:], kinds):
+        with tab:
+            render(kind, bases[kind])
+else:
+    render(choice, bases[choice])
 
 st.caption("실거래가는 신고까지 시차가 있어 최근 한두 달 거래가 빠질 수 있고, "
            "현재 호가와 다를 수 있습니다. 전월세는 확정일자 등으로 신고된 거래만 포함됩니다.")
