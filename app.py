@@ -10,7 +10,7 @@ st.set_page_config(page_title="실거래가 시세 조회", page_icon="🏠", la
 
 # ── 설정 ─────────────────────────────────────────────
 SERVICE_KEY = st.secrets["SERVICE_KEY"]  # .streamlit/secrets.toml 에서 읽음
-DEFAULT_GU = "연제구"  # 사무소가 있는 구로 바꾸세요
+DEFAULT_GU = "연제구"  # 처음 열 때 선택돼 있을 구
 TREND_MONTHS = 12      # 가격 변동 계산에 쓰는 기간(개월)
 
 URLS = {
@@ -38,6 +38,10 @@ FIELDS = {
     "deposit": ["deposit", "보증금액"],
     "rent": ["monthlyRent", "월세금액"],
     "cancel": ["cdealType", "해제여부"],
+    "jibun": ["jibun", "지번"],
+    "build": ["buildYear", "건축년도"],
+    "dealing": ["dealingGbn", "거래유형"],      # 매매: 중개거래 / 직거래
+    "ctype": ["contractType", "계약구분"],      # 전월세: 신규 / 갱신
 }
 
 
@@ -134,11 +138,11 @@ st.caption("국토교통부 실거래가 공개 자료 기준, 참고용 시세�
 
 gu_names = list(REGIONS)
 gu = st.selectbox("구", gu_names, index=gu_names.index(DEFAULT_GU))
-with st.expander("서울 외 지역"):
-    other_code = st.text_input("지역코드 5자리", placeholder="예: 41135 (성남시 분당구)")
+with st.expander("부산 외 지역"):
+    other_code = st.text_input("지역코드 5자리", placeholder="예: 48121 (창원시 의창구)")
 lawd_cd = other_code.strip() or REGIONS[gu]
 
-dong_text = st.text_input("동 (선택, 여러 개는 띄어서)", placeholder="예: 행당동 금호동4가")
+dong_text = st.text_input("동 (선택, 여러 개는 띄어서)", placeholder="예: 연산동 거제동")
 kind = st.radio("거래 종류", ["매매", "전세", "월세"], horizontal=True)
 budget_text = st.text_input("예산 최대 (선택)", placeholder="매매가 또는 보증금, 예: 4억5천")
 rent_max = 0
@@ -147,7 +151,7 @@ if kind == "월세":
 pyeong = st.slider("전용면적 (평)", 0, 60, (0, 60))
 months = st.select_slider("기간", options=[3, 6, 12], value=6,
                           format_func=lambda x: f"최근 {x}개월")
-apt_kw = st.text_input("단지명 검색 (선택)", placeholder="예: 대림")
+apt_kw = st.text_input("단지명 검색 (선택)", placeholder="예: 롯데캐슬")
 
 if st.button("조회하기", type="primary"):
     st.session_state.searched = True
@@ -260,21 +264,115 @@ summary = summary.merge(chg[["변동"]].reset_index(), on=["apt", "평형"], how
 summary["변동"] = summary["변동"].fillna("-")
 summary = summary.rename(columns={"apt": "단지"})
 
-st.markdown("**단지·평형별 요약** (최근 거래 순)")
-st.dataframe(summary, hide_index=True)
+st.markdown("**단지·평형별 요약** (줄 왼쪽을 누르면 상세 정보)")
+event = st.dataframe(summary, hide_index=True, on_select="rerun", selection_mode="single-row")
 what = "월세" if kind == "월세" else label
 st.caption(f"변동: 최근 3개월 {what} 중간값을 그 이전 9개월 중간값과 비교한 값. "
            "거래가 적으면 한두 건에 크게 흔들리니 참고만 하세요.")
 
-# ── 단지 하나의 월별 시세 흐름 ──
-st.markdown(f"**단지 시세 흐름** (최근 {TREND_MONTHS}개월, 월별 중간값)")
-pick = st.selectbox("단지·평형 선택", (summary["단지"] + " " + summary["평형"]).tolist())
-apt_name, py = pick.rsplit(" ", 1)
-one = base[(base["apt"] == apt_name) & (base["평형"] == py)].copy()
-one["월"] = one["계약일"].dt.to_period("M").dt.to_timestamp()
-monthly = one.groupby("월")[val_col].median().rename(f"{what} (만원)")
-st.line_chart(monthly)
-st.caption(f"이 단지·평형 거래 {len(one)}건. 거래가 없는 달은 앞뒤 점을 이어서 그립니다.")
+
+# ── 단지 상세 정보 ───────────────────────────────────
+def fmt(v_price, v_rent=None):
+    text = money(v_price)
+    if kind == "월세" and v_rent is not None:
+        text += f" / {int(v_rent)}만"
+    return text
+
+
+def show_detail(apt_name, py):
+    one = base[(base["apt"] == apt_name) & (base["평형"] == py)].sort_values("계약일", ascending=False)
+    if one.empty:
+        st.warning("이 단지·평형의 최근 12개월 거래가 없어요.")
+        return
+    first = one.iloc[0]
+    st.markdown(f"### {apt_name} {py}")
+
+    by = int(to_num(first["build"]))
+    age = dt.date.today().year - by + 1 if by else None
+    info = [f"{first['dong']} {first['jibun']}".strip(), f"전용 {one['평'].median():.1f}평"]
+    if age:
+        info.insert(1, f"{by}년 준공, {age}년차")
+    st.write(" / ".join(info))
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("최근 거래", fmt(first["가격"], first.get("월세")))
+    mid = one[val_col].median()
+    c2.metric(f"12개월 {what} 중간값", money(mid) if val_col == "가격" else f"{int(mid)}만")
+    c3.metric("3개월 변동", chg["변동"].get((apt_name, py), "-") if not chg.empty else "-")
+
+    feats = []
+    if age:
+        if age <= 5:
+            feats.append(f"준공 {age}년차 신축 단지예요.")
+        elif age <= 10:
+            feats.append(f"준공 {age}년차로 비교적 새 단지예요.")
+        elif age >= 30:
+            feats.append(f"준공 {age}년차 오래된 단지예요. 재건축 진행 상황은 따로 확인해 보세요.")
+        elif age >= 20:
+            feats.append(f"준공 {age}년차 구축 단지예요.")
+
+    size = one["평"].median()
+    peers = base[(base["dong"] == first["dong"]) & (base["apt"] != apt_name)
+                 & ((base["평"] - size).abs() <= 3)]
+    if len(peers) >= 3:
+        diff = (mid / peers[val_col].median() - 1) * 100
+        if abs(diff) >= 1:
+            feats.append(f"같은 동 비슷한 평수(±3평) 다른 단지보다 중간값이 {abs(diff):.0f}% "
+                         f"{'높아요' if diff > 0 else '낮아요'}. (비교 거래 {len(peers)}건)")
+
+    note = " 거래가 드물어 시세가 한두 건에 좌우될 수 있어요." if len(one) < 4 else ""
+    feats.append(f"최근 {TREND_MONTHS}개월 이 평형 거래는 {len(one)}건이에요.{note}")
+
+    fl = one["floor"].map(to_num)
+    if len(one) >= 6 and fl.nunique() > 2:
+        hi_p = one[fl >= fl.quantile(0.67)][val_col].median()
+        lo_p = one[fl <= fl.quantile(0.33)][val_col].median()
+        if lo_p:
+            d = (hi_p / lo_p - 1) * 100
+            if abs(d) >= 1:
+                feats.append(f"높은 층이 낮은 층보다 약 {abs(d):.0f}% {'비싸게' if d > 0 else '싸게'} 거래됐어요.")
+
+    if kind == "매매":
+        direct = (one["dealing"] == "직거래").sum()
+        if direct:
+            feats.append(f"직거래 {direct}건이 섞여 있어요. 가족 간 거래 등은 시세보다 낮을 수 있어요.")
+    else:
+        renew = one["ctype"].str.contains("갱신").sum()
+        new_c = one[one["ctype"].str.contains("신규")]
+        if renew:
+            feats.append(f"{len(one)}건 중 {renew}건이 갱신 계약이에요. 갱신은 인상 폭이 제한돼 "
+                         "신규 계약 시세보다 낮게 잡히는 편이에요.")
+        if renew and len(new_c):
+            m = new_c[val_col].median()
+            feats.append(f"신규 계약 {len(new_c)}건만 보면 {what} 중간값은 "
+                         f"{money(m) if val_col == '가격' else f'{int(m)}만'}이에요.")
+
+    st.markdown("**특징**")
+    st.markdown("\n".join(f"- {f}" for f in feats))
+
+    one = one.copy()
+    one["월"] = one["계약일"].dt.to_period("M").dt.to_timestamp()
+    st.markdown(f"**월별 {what} 흐름** (최근 {TREND_MONTHS}개월 중간값, 만원)")
+    st.line_chart(one.groupby("월")[val_col].median().rename(what))
+
+    t = pd.DataFrame({
+        "계약일": one["계약일"].dt.strftime("%y.%m.%d"),
+        "층": one["floor"],
+        label: one["가격"].map(money),
+    })
+    if kind == "월세":
+        t["월세"] = one["월세"].map(lambda v: f"{int(v)}만")
+    t["구분"] = one["dealing"] if kind == "매매" else one["ctype"]
+    st.markdown("**최근 거래**")
+    st.dataframe(t, hide_index=True)
+    st.caption("실거래 자료로 계산한 내용이에요. 역세권, 학군, 향 같은 정보는 실거래 자료에 없어서 넣지 않았어요.")
+
+
+if event.selection.rows:
+    sel = summary.iloc[event.selection.rows[0]]
+    show_detail(sel["단지"], sel["평형"])
+else:
+    st.info("요약표에서 단지 줄 왼쪽 칸을 누르면 그 단지의 상세 정보와 특징이 나와요.")
 
 with st.expander("개별 거래 전체 보기"):
     cols = ["계약일", "apt", "dong", "평", "floor", "가격"] + (["월세"] if kind == "월세" else [])
