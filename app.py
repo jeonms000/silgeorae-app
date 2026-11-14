@@ -185,8 +185,52 @@ def places(docs, n):
     return ", ".join(f"{d['place_name']} {dist(d['distance'])}" for d in docs[:n])
 
 
+# ── 손님용 공개 모드 (Secrets에 PUBLIC_MODE = true 일 때) ──
+PUBLIC_MODE = bool(st.secrets.get("PUBLIC_MODE", False))
+OFFICE = {
+    "name": st.secrets.get("OFFICE_NAME", "온누리부동산공인중개사사무소"),
+    "phone": st.secrets.get("OFFICE_PHONE", ""),
+    "addr": st.secrets.get("OFFICE_ADDR", "부산 부산진구 양연로 36 양정포레힐즈스위첸 단지내상가 1-3호"),
+    "ceo": st.secrets.get("OFFICE_CEO", ""),
+    "reg": st.secrets.get("OFFICE_REG", ""),
+    "map": st.secrets.get("OFFICE_MAP", "https://naver.me/539d3Fo1"),
+}
+if PUBLIC_MODE:
+    # 중개 가능한 근처 구만 남김. Secrets의 PUBLIC_GU로 바꿀 수 있음 (예: ["부산진구", "연제구"])
+    keep = list(st.secrets.get("PUBLIC_GU", ["부산진구", "연제구"]))
+    REGIONS = {g: REGIONS[g] for g in keep if g in REGIONS}
+    DEFAULT_GU = next(iter(REGIONS))
+    APP_PASSWORD = ""  # 손님용은 잠금 없음
+    SHEET_URL = ""     # 손님용은 조건 저장 없음
+
+
+def call_button(label="전화 상담하기"):
+    if OFFICE["phone"]:
+        st.link_button(label, "tel:" + re.sub(r"[^0-9+]", "", OFFICE["phone"]),
+                       type="primary", use_container_width=True)
+
+
+def office_footer():
+    lines = [f"상호 {OFFICE['name']}"]
+    if OFFICE["ceo"] or OFFICE["reg"]:
+        lines.append(f"대표 공인중개사 {OFFICE['ceo'] or '-'} · 등록번호 {OFFICE['reg'] or '-'}")
+    lines.append(f"소재지 {OFFICE['addr']}")
+    if OFFICE["phone"]:
+        lines.append(f"전화 {OFFICE['phone']}")
+    st.divider()
+    st.caption("  \n".join(lines))
+
+
 # ── 비밀번호 잠금 ────────────────────────────────────
-st.title("실거래가 시세 조회")
+if PUBLIC_MODE:
+    st.title(f"{OFFICE['name'].replace('공인중개사사무소', '')} 실거래가 조회")
+    st.write(f"{OFFICE['name']} · {OFFICE['addr']}")
+    b1, b2 = st.columns(2)
+    with b1:
+        call_button()
+    b2.link_button("네이버 지도로 길찾기", OFFICE["map"], use_container_width=True)
+else:
+    st.title("실거래가 시세 조회")
 if APP_PASSWORD and not st.session_state.get("authed"):
     pw = st.text_input("비밀번호", type="password")
     if pw == APP_PASSWORD:
@@ -235,7 +279,12 @@ def why(e):
         return ("시트를 찾지 못했어요. SHEET_URL 주소가 맞는지, 시트를 서비스 계정 이메일과 "
                 "편집자로 공유했는지 확인해 주세요.")
     if name == "PermissionError" or "PERMISSION_DENIED" in str(e):
-        return "시트에 접근 권한이 없어요. 서비스 계정 이메일을 편집자로 공유했는지 확인해 주세요."
+        detail = str(e)
+        if "has not been used" in detail or "disabled" in detail:
+            return ("구글 프로젝트에서 Google Sheets API(또는 Google Drive API)가 꺼져 있어요. "
+                    "Google Cloud 콘솔에서 '사용'을 누르고 몇 분 뒤 다시 시도해 주세요.")
+        return ("시트에 접근 권한이 없어요. 서비스 계정 이메일을 편집자로 공유했는지, "
+                f"SHEET_URL이 그 시트 주소인지 확인해 주세요. (원문: {detail[:200]})")
     return f"{name}: {e}"
 
 
@@ -330,8 +379,11 @@ if SHEET_URL:
 # ── 입력 화면 ────────────────────────────────────────
 gu_names = list(REGIONS)
 gu = st.selectbox("구", gu_names, key="gu")
-with st.expander("부산 외 지역"):
-    other_code = st.text_input("지역코드 5자리", placeholder="예: 48121 (창원시 의창구)", key="other_code")
+if PUBLIC_MODE:
+    other_code = ""
+else:
+    with st.expander("부산 외 지역"):
+        other_code = st.text_input("지역코드 5자리", placeholder="예: 48121 (창원시 의창구)", key="other_code")
 lawd_cd = other_code.strip() or REGIONS[gu]
 
 dong_text = st.text_input("동 (선택, 여러 개는 띄어서)", placeholder="예: 연산동 거제동", key="dong_text")
@@ -507,10 +559,13 @@ def show_detail(kind, base, chg, apt_name, py):
         info.insert(1, f"{by}년 준공, {age}년차")
     st.write(" / ".join(info))
 
-    q = f"{first['dong']} {apt_name}"
-    b1, b2 = st.columns(2)
-    b1.link_button("네이버 부동산 매물", "https://m.land.naver.com/search/result/" + quote(q))
-    b2.link_button("네이버 검색", "https://search.naver.com/search.naver?query=" + quote(q + " 아파트"))
+    if PUBLIC_MODE:
+        call_button(f"{apt_name} {py} {kind} 상담 문의")
+    else:
+        q = f"{first['dong']} {apt_name}"
+        b1, b2 = st.columns(2)
+        b1.link_button("네이버 부동산 매물", "https://m.land.naver.com/search/result/" + quote(q))
+        b2.link_button("네이버 검색", "https://search.naver.com/search.naver?query=" + quote(q + " 아파트"))
 
     show_nearby(first["dong"], first["jibun"], apt_name)
 
@@ -566,8 +621,9 @@ def show_detail(kind, base, chg, apt_name, py):
             feats.append(f"신규 계약 {len(new_c)}건만 보면 {what} 중간값은 "
                          f"{amount(new_c[val_col].median(), val_col)}이에요.")
 
-    st.markdown("**특징**")
-    st.markdown("\n".join(f"- {f}" for f in feats))
+    if not PUBLIC_MODE:  # 단지 평가처럼 읽힐 수 있는 문구는 손님용에서 숨김
+        st.markdown("**특징**")
+        st.markdown("\n".join(f"- {f}" for f in feats))
 
     one = one.copy()
     one["월"] = one["계약일"].dt.to_period("M").dt.to_timestamp()
@@ -765,3 +821,7 @@ else:
 
 st.caption("실거래가는 신고까지 시차가 있어 최근 한두 달 거래가 빠질 수 있고, "
            "현재 호가와 다를 수 있습니다. 전월세는 확정일자 등으로 신고된 거래만 포함됩니다.")
+if PUBLIC_MODE:
+    st.markdown("**지금 나와 있는 매물과 정확한 시세는 전화로 편하게 물어보세요.**")
+    call_button()
+    office_footer()
