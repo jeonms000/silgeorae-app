@@ -246,6 +246,8 @@ def digest_period(option):
 POSTER_GUS = list(st.secrets.get("POSTER_GUS", ["부산진구", "연제구"]))
 HOME_NAME = st.secrets.get("HOME_NAME", "양정포레힐즈스위첸")  # 거래가 없을 때 1장에 쓸 이름
 NEARBY_DEFAULT = list(st.secrets.get("NEARBY_APTS", ["연산롯데캐슬골드", "양정자이더샵", "연산더샵"]))
+# 1장 아래에 적을 사무소 이름들 (Secrets의 POSTER_NAMES로 바꿀 수 있음)
+POSTER_NAMES = st.secrets.get("POSTER_NAMES", None)
 
 
 def norm(name):
@@ -386,7 +388,9 @@ def build_poster(data, label, home, nearby, show_floor):
         qr = (f"<div class='qr'><div class='qrbox'>{qr_svg}</div><p><b>근처 다른 단지 시세가 궁금하면<br>"
               f"QR을 찍어 보세요</b><br><span class='url'>{e(PUBLIC_URL)}</span></p></div>")
     # 아래 공간을 아끼려고 1장은 사무소 이름만, 2장은 QR만
-    footer1 = f"<footer class='name'><b>{e(OFFICE['name'])}</b></footer>"
+    names = list(POSTER_NAMES) if POSTER_NAMES else [OFFICE["name"], "스위첸자이부동산"]
+    footer1 = ("<footer class='name'>" + "<span class='dot'>·</span>".join(f"<b>{e(n)}</b>" for n in names)
+               + "</footer>")
     footer2 = f"<footer class='qrfoot'>{qr}</footer>" if qr else footer1
     qr_js = ("" if qr_svg or not PUBLIC_URL else
              "<script src='https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js'></script>"
@@ -438,6 +442,8 @@ td.amt {{ font-weight: 700; color: #17407A; }}
 footer {{ margin-top: auto; break-inside: avoid; page-break-inside: avoid; display: flex; align-items: center;
   justify-content: flex-end; gap: 6mm; border-top: 0.4mm solid #000000; padding-top: 2.5mm; color: #000000; }}
 footer.name b {{ font-size: 13pt; color: #000000; }}
+footer.name {{ gap: 0; }}
+footer.name .dot {{ font-size: 13pt; margin: 0 2.5mm; }}
 .office b {{ font-size: 14pt; color: #000000; }}
 .office p {{ margin: 1mm 0 0; font-size: 10pt; line-height: 1.6; }}
 .office {{ flex: 1 1 auto; min-width: 0; }}
