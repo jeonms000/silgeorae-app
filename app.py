@@ -309,13 +309,13 @@ def build_poster(data, label, home, nearby, show_floor):
         return b[b["apt"] == apt].sort_values("계약일", ascending=False)
 
     # 1장: 우리 단지 거래를 하나하나 (한 표, 종류별로 묶어서)
-    max_rows, rows, counts = 18, [], []
+    rows, counts = [], []
     for kind in ["매매", "전세", "월세"]:
         d = deals(home, kind)
         if d is None or d.empty:
             continue
         counts.append(f"{kind} {len(d)}건")
-        shown = d.head(max(max_rows - len(rows), 0))
+        shown = d
         for n, (_, r) in enumerate(shown.iterrows()):
             first = (f"<th scope='row' rowspan='{len(shown)}'>{kind}</th>" if n == 0 else "")
             rows.append("<tr>" + first
@@ -327,8 +327,7 @@ def build_poster(data, label, home, nearby, show_floor):
     if rows:
         head = ("<th>종류</th><th>계약일</th><th>전용(㎡)</th>" + ("<th>층</th>" if show_floor else "")
                 + "<th>금액 (월세는 보증금 / 월)</th><th>구분</th>")
-        more = (f"<p class='more'>외 {total - len(rows)}건은 지면 관계로 생략했어요.</p>"
-                if len(rows) < total else "")
+        more = ""
         page1_body = (f"<section class='block home'><h2>{' · '.join(counts)}</h2>"
                       f"<table><thead><tr>{head}</tr></thead><tbody>{''.join(rows)}</tbody></table>{more}</section>")
     else:
@@ -345,9 +344,7 @@ def build_poster(data, label, home, nearby, show_floor):
                 continue
             dong = dong or d["dong"].iat[0]
             for s_, g in d.groupby(d["㎡"].astype(int)):
-                items = [amount(kind, r) + (f" · {floor(r)}" if show_floor else "") for _, r in g.head(3).iterrows()]
-                if len(g) > 3:
-                    items.append(f"외 {len(g) - 3}건")
+                items = [amount(kind, r) + (f" · {floor(r)}" if show_floor else "") for _, r in g.iterrows()]
                 by_sqm.setdefault(s_, {})[kind] = items
         if not by_sqm:
             body = "<p class='empty'>이 기간에 신고된 거래가 없어요.</p>"
@@ -362,10 +359,6 @@ def build_poster(data, label, home, nearby, show_floor):
                 for s_, c in sorted(by_sqm.items()))
             body = ("<table><thead><tr><th>전용(㎡)</th><th>매매</th><th>전세</th><th>월세 (보증금/월)</th></tr></thead>"
                     f"<tbody>{rows}</tbody></table>")
-        if need > lines_left:
-            dropped.append(apt)
-            continue
-        lines_left -= need
         blocks.append(f"<section class='block'><h2>{e(apt)}{f' <span>{e(dong)}</span>' if dong else ''}</h2>{body}</section>")
     page2_body = "".join(blocks) or "<p class='empty'>넣을 단지를 골라 주세요.</p>"
 
@@ -413,8 +406,11 @@ def build_poster(data, label, home, nearby, show_floor):
 * {{ box-sizing: border-box; }}
 body {{ margin: 0; font-family: "Noto Sans KR", "Malgun Gothic", "Apple SD Gothic Neo", sans-serif;
   color: #1B2427; -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
-.sheet {{ width: 186mm; min-height: 262mm; margin: 0 auto; display: flex; flex-direction: column; gap: 5mm;
+.sheet {{ width: 186mm; margin: 0 auto; display: flex; flex-direction: column; gap: 5mm;
   break-after: page; page-break-after: always; }}
+tr, .office, .qr {{ break-inside: avoid; page-break-inside: avoid; }}
+h2 {{ break-after: avoid; page-break-after: avoid; }}
+thead {{ display: table-header-group; }}
 .sheet:last-of-type {{ break-after: auto; page-break-after: auto; }}
 @media screen {{ body {{ background: #DDE3E2; padding: 8mm 0; }}
   .sheet {{ background: #fff; padding: 10mm 12mm; width: 210mm; min-height: 297mm; margin-bottom: 8mm; }} }}
@@ -432,7 +428,7 @@ td.amt {{ font-weight: 700; }}
 .sub {{ font-size: 0.85em; color: #5A676B; }}
 .more, .empty {{ margin: 2mm 0 0; font-size: 10pt; color: #4A585C; }}
 .notes {{ margin: 0; font-size: 9pt; line-height: 1.6; color: #4A585C; }}
-footer {{ margin-top: auto; display: flex; align-items: center; justify-content: space-between; gap: 6mm;
+footer {{ margin-top: 6mm; break-inside: avoid; page-break-inside: avoid; display: flex; align-items: center; justify-content: space-between; gap: 6mm;
   border-top: 0.5mm solid #1B2427; padding-top: 4mm; }}
 .office b {{ font-size: 14pt; }}
 .office p {{ margin: 1mm 0 0; font-size: 10pt; line-height: 1.6; }}
@@ -472,12 +468,12 @@ def render_poster(start, end, label, show_floor):
     if home_i is None:
         home_opts.insert(0, HOME_NAME)
         home_i = 0
-    home = st.selectbox("1장: 우리 단지", home_opts, index=home_i, format_func=fmt, key="pt_home")
+    home = st.selectbox("우리 단지", home_opts, index=home_i, format_func=fmt, key="pt_home")
 
     rest = [a for a in cands if a != home]
     defaults = [a for a in rest if any(norm(k) in norm(a) for k in NEARBY_DEFAULT)]
     missing = [k for k in NEARBY_DEFAULT if not any(norm(k) in norm(a) for a in rest)]
-    nearby = st.multiselect("2장: 근처 아파트 (기본 3곳, 더 추가할 수 있어요)", rest, default=defaults,
+    nearby = st.multiselect("근처 아파트 (기본 3곳, 더 추가할 수 있어요)", rest, default=defaults,
                             format_func=fmt, key="pt_nearby")
     if missing:
         st.caption("이 기간에 거래가 없어서 기본 목록에서 빠진 단지: " + ", ".join(missing))
@@ -487,13 +483,13 @@ def render_poster(start, end, label, show_floor):
     dropped, poster = build_poster(data, label, home, nearby, show_floor)
     if dropped:
         st.warning("거래가 많아 2장에 다 들어가지 않아 빠진 단지: " + ", ".join(dropped))
-    st.download_button("인쇄용 파일 내려받기 (A4 2장)", poster.encode("utf-8"),
+    st.download_button("인쇄용 파일 내려받기 (A4)", poster.encode("utf-8"),
                        file_name=f"실거래소식_{label.split('(')[0].replace(' ', '')}.html",
                        mime="text/html", type="primary")
     st.caption("내려받은 파일을 열고 Ctrl+P(맥은 Cmd+P)로 A4 세로 인쇄하세요. "
                "인쇄 설정에서 '머리글과 바닥글'은 끄고 '배경 그래픽'은 켜 주세요. "
-               "1장은 우리 단지 거래를 종류별 최근 순으로 18건까지, 2장은 근처 단지를 면적별로 보여줘요. "
-               "종이에 다 들어가지 않는 단지는 자동으로 빠져요.")
+               "우리 단지 거래를 먼저, 근처 단지를 그다음에 모두 보여줘요. 거래가 많으면 장수가 늘어나요(보통 2~4장). "
+               "사무소 정보와 QR은 각 부분의 마지막 장 아래에만 들어가요.")
     if st.checkbox("미리보기 보기", value=False, key="pt_preview"):
         import streamlit.components.v1 as components
         components.html(poster, height=1300, scrolling=True)
@@ -501,7 +497,7 @@ def render_poster(start, end, label, show_floor):
 
 def render_poster_top():
     """어머니용 앱 맨 위: 문 앞 포스터를 바로 만들고 내려받기."""
-    with st.expander("문 앞 포스터 만들기 (A4 2장)", expanded=True):
+    with st.expander("문 앞 포스터 만들기 (A4 인쇄)", expanded=True):
         c1, c2 = st.columns([3, 1])
         with c1:
             period = st.radio("기간", ["지난달", "이번 달", "최근 30일"], horizontal=True, key="pt_period")
