@@ -352,8 +352,7 @@ def build_poster(data, label, home, nearby, show_floor):
         else:
             rows = "".join(
                 f"<tr><td>{s_}</td>" + "".join(
-                    "<td>" + ("<br>".join(f"<span class='sub'>{e(x)}</span>" if x.startswith("외 ") else e(x)
-                                          for x in c.get(k, [])) or "-") + "</td>"
+                    "<td>" + ("".join(f"<span class='deal'>{e(x)}</span>" for x in c.get(k, [])) or "-") + "</td>"
                     for k in kinds_) + "</tr>"
                 for s_, c in sorted(by_sqm.items()))
             body = ("<table><thead><tr><th>전용(㎡)</th><th>매매</th><th>전세</th></tr></thead>"
@@ -386,14 +385,15 @@ def build_poster(data, label, home, nearby, show_floor):
     if PUBLIC_URL:
         qr = (f"<div class='qr'><div class='qrbox'>{qr_svg}</div><p><b>근처 다른 단지 시세가 궁금하면<br>"
               f"QR을 찍어 보세요</b><br><span class='url'>{e(PUBLIC_URL)}</span></p></div>")
-    footer = (f"<footer><div class='office'><b>{e(OFFICE['name'])}</b><p>{e(OFFICE['addr'])}<br>{contact}</p>"
-              f"<p>매물 상담은 편하게 들어오세요.</p></div>{qr}</footer>")
+    # 아래 공간을 아끼려고 1장은 사무소 이름만, 2장은 QR만
+    footer1 = f"<footer class='name'><b>{e(OFFICE['name'])}</b></footer>"
+    footer2 = f"<footer class='qrfoot'>{qr}</footer>" if qr else footer1
     qr_js = ("" if qr_svg or not PUBLIC_URL else
              "<script src='https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js'></script>"
              "<script>try{document.querySelectorAll('.qrbox').forEach(function(el){new QRCode(el,{text:"
              + repr(PUBLIC_URL) + ",width:132,height:132,correctLevel:QRCode.CorrectLevel.M});});}catch(err){}</script>")
 
-    def sheet(kicker, title, body):
+    def sheet(kicker, title, body, footer):
         return (f"<div class='sheet'><header><p class='kicker'>{e(kicker)}</p><h1>{e(title)}</h1></header>"
                 f"{body}<p class='notes'>{note}</p>{footer}</div>")
 
@@ -414,7 +414,7 @@ thead {{ display: table-header-group; }}
 @media screen {{ body {{ background: #D9E3F0; padding: 8mm 0; }}
   .sheet {{ background: #fff; padding: 12mm; width: 210mm; min-height: 297mm; margin-bottom: 8mm; }} }}
 header {{ position: relative; overflow: hidden; background: #17407A; color: #FFFFFF; border-radius: 4mm;
-  padding: 7mm 8mm 6.5mm; }}
+  padding: 5.5mm 8mm 5mm; }}
 header::after {{ content: ""; position: absolute; right: -14mm; top: -18mm; width: 62mm; height: 62mm;
   border-radius: 50%; border: 9mm solid rgba(255,255,255,0.08); }}
 header::before {{ content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 1.6mm; background: #5DA3E6; }}
@@ -423,7 +423,9 @@ h1 {{ position: relative; margin: 1.5mm 0 0; font-size: 27pt; font-weight: 900; 
 h2 {{ margin: 0 0 calc(var(--pad) * 1.5); font-size: calc(var(--fs) + 2.5pt); font-weight: 700; color: #17407A; }}
 h2 span {{ font-size: 10.5pt; font-weight: 400; color: #52617A; margin-left: 2mm; }}
 .block {{ background: #F2F7FD; border: 0.3mm solid #D3E1F1; border-radius: 3mm; padding: calc(var(--pad) * 2.6) 4.5mm; }}
-.home tbody th {{ font-weight: 700; color: #2563A8; width: 14mm; }}
+.home tbody th {{ font-weight: 700; color: #2563A8; white-space: nowrap; }}
+th, td.amt {{ white-space: nowrap; }}
+.deal {{ display: inline-block; white-space: nowrap; margin-right: 5mm; }}
 table {{ width: 100%; border-collapse: collapse; font-size: var(--fs); line-height: 1.35; font-variant-numeric: tabular-nums; }}
 th, td {{ border-bottom: 0.3mm solid #D3E1F1; padding: var(--pad) 2.2mm; text-align: left; vertical-align: top; }}
 thead th {{ font-size: calc(var(--fs) - 2pt); color: #FFFFFF; font-weight: 700; background: #2563A8; border-bottom: 0; }}
@@ -434,7 +436,8 @@ td.amt {{ font-weight: 700; color: #17407A; }}
 .more, .empty {{ margin: 2mm 0 0; font-size: 10pt; color: #52617A; }}
 .notes {{ margin: 0; font-size: 9pt; line-height: 1.6; color: #52617A; }}
 footer {{ margin-top: auto; break-inside: avoid; page-break-inside: avoid; display: flex; align-items: center;
-  justify-content: space-between; gap: 6mm; border-top: 0.5mm solid #000000; padding-top: 4mm; color: #000000; }}
+  justify-content: flex-end; gap: 6mm; border-top: 0.4mm solid #000000; padding-top: 2.5mm; color: #000000; }}
+footer.name b {{ font-size: 13pt; color: #000000; }}
 .office b {{ font-size: 14pt; color: #000000; }}
 .office p {{ margin: 1mm 0 0; font-size: 10pt; line-height: 1.6; }}
 .office {{ flex: 1 1 auto; min-width: 0; }}
@@ -443,18 +446,18 @@ footer {{ margin-top: auto; break-inside: avoid; page-break-inside: avoid; displ
 .qr p {{ margin: 0; font-size: 10.5pt; line-height: 1.5; color: #000000; }}
 .qr .url {{ font-size: 8pt; color: #333333; word-break: break-all; }}
 .qrbox {{ background: #FFFFFF; }}
-.qrbox img, .qrbox canvas, .qrbox svg {{ width: 28mm !important; height: 28mm !important; display: block; }}
+.qrbox img, .qrbox canvas, .qrbox svg {{ width: 24mm !important; height: 24mm !important; display: block; }}
 </style></head>
 <body>
-{sheet("우리 단지 실거래 소식", f"{home} · {label}", page1_body)}
-{sheet(f"{label} 실거래", "근처 아파트 시세", page2_body)}
+{sheet("우리 단지 실거래 소식", f"{home} · {label}", page1_body, footer1)}
+{sheet(f"{label} 실거래", "근처 아파트 시세", page2_body, footer2)}
 {qr_js}
 <script>
 // 한 장 높이(약 268mm)에 맞을 때까지 글씨와 줄 간격을 단계적으로 줄임. 내용은 빼지 않음.
 (function () {{
-  var STEPS = [[11.5,1.3,5],[11,1.0,4.5],[10.5,0.8,4],[10,0.65,3.5],[9.5,0.5,3],[9,0.4,2.5],
-               [8.5,0.3,2],[8,0.25,2],[7.5,0.2,1.5],[7,0.15,1.5]];
-  var MM = 96 / 25.4, LIMIT = 268 * MM;
+  var STEPS = [[16,2.2,6],[15,2.0,6],[14,1.8,5.5],[13,1.6,5],[12.5,1.4,4.5],[12,1.2,4],[11.5,1.0,4],
+               [11,0.9,3.5],[10.5,0.75,3],[10,0.6,3],[9.5,0.5,2.5],[9,0.4,2],[8.5,0.3,2],[8,0.25,1.5]];
+  var MM = 96 / 25.4, LIMIT = 270 * MM;
   function natural(el) {{
     var cs = getComputedStyle(el), keep = el.style.minHeight;
     el.style.minHeight = "0";
@@ -524,8 +527,8 @@ def render_poster(start, end, label, show_floor):
                        mime="text/html", type="primary")
     st.caption("내려받은 파일을 열고 Ctrl+P(맥은 Cmd+P)로 A4 세로 인쇄하세요. "
                "인쇄 설정에서 '머리글과 바닥글'은 끄고 '배경 그래픽'은 켜 주세요. "
-               "매매와 전세만 넣고(월세는 빼요), 거래는 하나도 빼지 않아요. 글씨와 줄 간격을 자동으로 줄여서 "
-               "우리 단지 1장, 근처 아파트 1장에 맞춰요. 거래가 아주 많아 가장 작은 글씨로도 넘치면 다음 장으로 이어져요.")
+               "매매와 전세만 넣고(월세는 빼요), 거래는 하나도 빼지 않아요. 글씨는 크게 시작해서 넘칠 때만 줄여 "
+               "우리 단지 1장, 근처 아파트 1장에 맞춰요. 1장 아래에는 사무소 이름만, 2장 아래에는 QR만 들어가요.")
     if st.checkbox("미리보기 보기", value=False, key="pt_preview"):
         import streamlit.components.v1 as components
         components.html(poster, height=1300, scrolling=True)
