@@ -309,8 +309,9 @@ def build_poster(data, label, home, nearby, show_floor):
         return b[b["apt"] == apt].sort_values("계약일", ascending=False)
 
     # 1장: 우리 단지 거래를 하나하나 (한 표, 종류별로 묶어서)
+    kinds_ = ["매매", "전세"]  # 포스터에는 월세를 넣지 않음
     rows, counts = [], []
-    for kind in ["매매", "전세", "월세"]:
+    for kind in kinds_:
         d = deals(home, kind)
         if d is None or d.empty:
             continue
@@ -326,7 +327,7 @@ def build_poster(data, label, home, nearby, show_floor):
     total = sum(int(re.sub(r'[^0-9]', '', c)) for c in counts)
     if rows:
         head = ("<th>종류</th><th>계약일</th><th>전용(㎡)</th>" + ("<th>층</th>" if show_floor else "")
-                + "<th>금액 (월세는 보증금 / 월)</th><th>구분</th>")
+                + "<th>금액</th><th>구분</th>")
         more = ""
         page1_body = (f"<section class='block home'><h2>{' · '.join(counts)}</h2>"
                       f"<table><thead><tr>{head}</tr></thead><tbody>{''.join(rows)}</tbody></table>{more}</section>")
@@ -334,11 +335,11 @@ def build_poster(data, label, home, nearby, show_floor):
         page1_body = "<p class='empty'>이 기간에 신고된 거래가 아직 없어요.</p>"
 
     # 2장: 근처 아파트, 면적별로 거래를 한 줄씩
-    blocks, lines_left, dropped = [], 29, []
+    blocks, dropped = [], []
     for apt in nearby:
         by_sqm = {}
         dong = ""
-        for kind in ["매매", "전세", "월세"]:
+        for kind in kinds_:
             d = deals(apt, kind)
             if d is None or d.empty:
                 continue
@@ -348,16 +349,14 @@ def build_poster(data, label, home, nearby, show_floor):
                 by_sqm.setdefault(s_, {})[kind] = items
         if not by_sqm:
             body = "<p class='empty'>이 기간에 신고된 거래가 없어요.</p>"
-            need = 2
         else:
-            need = 3 + sum(max(len(v) for v in c.values()) for c in by_sqm.values())
             rows = "".join(
                 f"<tr><td>{s_}</td>" + "".join(
                     "<td>" + ("<br>".join(f"<span class='sub'>{e(x)}</span>" if x.startswith("외 ") else e(x)
                                           for x in c.get(k, [])) or "-") + "</td>"
-                    for k in ["매매", "전세", "월세"]) + "</tr>"
+                    for k in kinds_) + "</tr>"
                 for s_, c in sorted(by_sqm.items()))
-            body = ("<table><thead><tr><th>전용(㎡)</th><th>매매</th><th>전세</th><th>월세 (보증금/월)</th></tr></thead>"
+            body = ("<table><thead><tr><th>전용(㎡)</th><th>매매</th><th>전세</th></tr></thead>"
                     f"<tbody>{rows}</tbody></table>")
         blocks.append(f"<section class='block'><h2>{e(apt)}{f' <span>{e(dong)}</span>' if dong else ''}</h2>{body}</section>")
     page2_body = "".join(blocks) or "<p class='empty'>넣을 단지를 골라 주세요.</p>"
@@ -405,42 +404,79 @@ def build_poster(data, label, home, nearby, show_floor):
 @page {{ size: A4; margin: 12mm; }}
 * {{ box-sizing: border-box; }}
 body {{ margin: 0; font-family: "Noto Sans KR", "Malgun Gothic", "Apple SD Gothic Neo", sans-serif;
-  color: #1B2427; -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
-.sheet {{ width: 186mm; margin: 0 auto; display: flex; flex-direction: column; gap: 5mm;
-  break-after: page; page-break-after: always; }}
+  color: #14213D; -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
+.sheet {{ --fs: 11.5pt; --pad: 1.3mm; --gap: 5mm; width: 186mm; min-height: 270mm; margin: 0 auto;
+  display: flex; flex-direction: column; gap: var(--gap); break-after: page; page-break-after: always; }}
+.sheet:last-of-type {{ break-after: auto; page-break-after: auto; }}
 tr, .office, .qr {{ break-inside: avoid; page-break-inside: avoid; }}
 h2 {{ break-after: avoid; page-break-after: avoid; }}
 thead {{ display: table-header-group; }}
-.sheet:last-of-type {{ break-after: auto; page-break-after: auto; }}
-@media screen {{ body {{ background: #DDE3E2; padding: 8mm 0; }}
-  .sheet {{ background: #fff; padding: 10mm 12mm; width: 210mm; min-height: 297mm; margin-bottom: 8mm; }} }}
-header {{ border-bottom: 1.2mm solid #1E5B5A; padding-bottom: 4mm; }}
-.kicker {{ margin: 0; font-size: 13pt; font-weight: 700; color: #1E5B5A; }}
-h1 {{ margin: 1mm 0 0; font-size: 28pt; font-weight: 900; line-height: 1.15; }}
-h2 {{ margin: 0 0 2mm; font-size: 14pt; font-weight: 700; }}
-h2 span {{ font-size: 11pt; font-weight: 400; color: #4A585C; margin-left: 2mm; }}
-.block {{ background: #F1F5F4; border-radius: 3mm; padding: 3mm 4mm; }}
-.home tbody th {{ font-weight: 700; color: #1E5B5A; width: 14mm; }}
-table {{ width: 100%; border-collapse: collapse; font-size: 11.5pt; font-variant-numeric: tabular-nums; }}
-th, td {{ border-bottom: 0.3mm solid #C7D1D0; padding: 1.3mm 2.2mm; text-align: left; vertical-align: top; }}
-thead th {{ font-size: 9.5pt; color: #4A585C; font-weight: 700; border-bottom: 0.5mm solid #1B2427; }}
-td.amt {{ font-weight: 700; }}
-.sub {{ font-size: 0.85em; color: #5A676B; }}
-.more, .empty {{ margin: 2mm 0 0; font-size: 10pt; color: #4A585C; }}
-.notes {{ margin: 0; font-size: 9pt; line-height: 1.6; color: #4A585C; }}
-footer {{ margin-top: 6mm; break-inside: avoid; page-break-inside: avoid; display: flex; align-items: center; justify-content: space-between; gap: 6mm;
-  border-top: 0.5mm solid #1B2427; padding-top: 4mm; }}
-.office b {{ font-size: 14pt; }}
+@media screen {{ body {{ background: #D9E3F0; padding: 8mm 0; }}
+  .sheet {{ background: #fff; padding: 12mm; width: 210mm; min-height: 297mm; margin-bottom: 8mm; }} }}
+header {{ position: relative; overflow: hidden; background: #17407A; color: #FFFFFF; border-radius: 4mm;
+  padding: 7mm 8mm 6.5mm; }}
+header::after {{ content: ""; position: absolute; right: -14mm; top: -18mm; width: 62mm; height: 62mm;
+  border-radius: 50%; border: 9mm solid rgba(255,255,255,0.08); }}
+header::before {{ content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 1.6mm; background: #5DA3E6; }}
+.kicker {{ margin: 0; font-size: 12pt; font-weight: 700; color: #BFD9F5; letter-spacing: 0.02em; }}
+h1 {{ position: relative; margin: 1.5mm 0 0; font-size: 27pt; font-weight: 900; line-height: 1.15; color: #FFFFFF; }}
+h2 {{ margin: 0 0 calc(var(--pad) * 1.5); font-size: calc(var(--fs) + 2.5pt); font-weight: 700; color: #17407A; }}
+h2 span {{ font-size: 10.5pt; font-weight: 400; color: #52617A; margin-left: 2mm; }}
+.block {{ background: #F2F7FD; border: 0.3mm solid #D3E1F1; border-radius: 3mm; padding: calc(var(--pad) * 2.6) 4.5mm; }}
+.home tbody th {{ font-weight: 700; color: #2563A8; width: 14mm; }}
+table {{ width: 100%; border-collapse: collapse; font-size: var(--fs); line-height: 1.35; font-variant-numeric: tabular-nums; }}
+th, td {{ border-bottom: 0.3mm solid #D3E1F1; padding: var(--pad) 2.2mm; text-align: left; vertical-align: top; }}
+thead th {{ font-size: calc(var(--fs) - 2pt); color: #FFFFFF; font-weight: 700; background: #2563A8; border-bottom: 0; }}
+thead th:first-child {{ border-radius: 1.5mm 0 0 1.5mm; }}
+thead th:last-child {{ border-radius: 0 1.5mm 1.5mm 0; }}
+td.amt {{ font-weight: 700; color: #17407A; }}
+.sub {{ font-size: 0.85em; color: #52617A; }}
+.more, .empty {{ margin: 2mm 0 0; font-size: 10pt; color: #52617A; }}
+.notes {{ margin: 0; font-size: 9pt; line-height: 1.6; color: #52617A; }}
+footer {{ margin-top: auto; break-inside: avoid; page-break-inside: avoid; display: flex; align-items: center;
+  justify-content: space-between; gap: 6mm; border-top: 0.5mm solid #000000; padding-top: 4mm; color: #000000; }}
+.office b {{ font-size: 14pt; color: #000000; }}
 .office p {{ margin: 1mm 0 0; font-size: 10pt; line-height: 1.6; }}
-.qr {{ display: flex; align-items: center; gap: 4mm; }}
-.qr p {{ margin: 0; font-size: 10.5pt; line-height: 1.5; }}
-.qr .url {{ font-size: 8pt; color: #4A585C; word-break: break-all; }}
-.qrbox img, .qrbox canvas, .qrbox svg {{ width: 30mm !important; height: 30mm !important; display: block; }}
+.office {{ flex: 1 1 auto; min-width: 0; }}
+.qr {{ flex: 0 0 auto; display: flex; align-items: center; gap: 4mm; }}
+.qr b {{ white-space: nowrap; }}
+.qr p {{ margin: 0; font-size: 10.5pt; line-height: 1.5; color: #000000; }}
+.qr .url {{ font-size: 8pt; color: #333333; word-break: break-all; }}
+.qrbox {{ background: #FFFFFF; }}
+.qrbox img, .qrbox canvas, .qrbox svg {{ width: 28mm !important; height: 28mm !important; display: block; }}
 </style></head>
 <body>
 {sheet("우리 단지 실거래 소식", f"{home} · {label}", page1_body)}
 {sheet(f"{label} 실거래", "근처 아파트 시세", page2_body)}
 {qr_js}
+<script>
+// 한 장 높이(약 268mm)에 맞을 때까지 글씨와 줄 간격을 단계적으로 줄임. 내용은 빼지 않음.
+(function () {{
+  var STEPS = [[11.5,1.3,5],[11,1.0,4.5],[10.5,0.8,4],[10,0.65,3.5],[9.5,0.5,3],[9,0.4,2.5],
+               [8.5,0.3,2],[8,0.25,2],[7.5,0.2,1.5],[7,0.15,1.5]];
+  var MM = 96 / 25.4, LIMIT = 268 * MM;
+  function natural(el) {{
+    var cs = getComputedStyle(el), keep = el.style.minHeight;
+    el.style.minHeight = "0";
+    var h = el.scrollHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom);
+    el.style.minHeight = keep;
+    return h;
+  }}
+  function fit() {{
+    document.querySelectorAll(".sheet").forEach(function (el) {{
+      for (var i = 0; i < STEPS.length; i++) {{
+        el.style.setProperty("--fs", STEPS[i][0] + "pt");
+        el.style.setProperty("--pad", STEPS[i][1] + "mm");
+        el.style.setProperty("--gap", STEPS[i][2] + "mm");
+        if (natural(el) <= LIMIT) break;
+      }}
+    }});
+  }}
+  fit();
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(fit);
+  window.addEventListener("beforeprint", fit);
+}})();
+</script>
 </body></html>"""
 
 
@@ -488,8 +524,8 @@ def render_poster(start, end, label, show_floor):
                        mime="text/html", type="primary")
     st.caption("내려받은 파일을 열고 Ctrl+P(맥은 Cmd+P)로 A4 세로 인쇄하세요. "
                "인쇄 설정에서 '머리글과 바닥글'은 끄고 '배경 그래픽'은 켜 주세요. "
-               "우리 단지 거래를 먼저, 근처 단지를 그다음에 모두 보여줘요. 거래가 많으면 장수가 늘어나요(보통 2~4장). "
-               "사무소 정보와 QR은 각 부분의 마지막 장 아래에만 들어가요.")
+               "매매와 전세만 넣고(월세는 빼요), 거래는 하나도 빼지 않아요. 글씨와 줄 간격을 자동으로 줄여서 "
+               "우리 단지 1장, 근처 아파트 1장에 맞춰요. 거래가 아주 많아 가장 작은 글씨로도 넘치면 다음 장으로 이어져요.")
     if st.checkbox("미리보기 보기", value=False, key="pt_preview"):
         import streamlit.components.v1 as components
         components.html(poster, height=1300, scrolling=True)
