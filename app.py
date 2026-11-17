@@ -1,4 +1,5 @@
 import datetime as dt
+import html as html_lib
 import re
 import xml.etree.ElementTree as ET
 from urllib.parse import quote
@@ -11,7 +12,7 @@ st.set_page_config(page_title="실거래가 시세 조회", page_icon="🏠", la
 
 # ── 설정 ─────────────────────────────────────────────
 SERVICE_KEY = st.secrets["SERVICE_KEY"]  # .streamlit/secrets.toml 에서 읽음
-DEFAULT_GU = "연제구"  # 처음 열 때 선택돼 있을 구
+DEFAULT_GU = "부산진구"  # 처음 열 때 선택돼 있을 구
 TREND_MONTHS = 12      # 가격 변동 계산에 쓰는 기간(개월)
 REGION_PREFIX = "부산"  # 주소 검색에 붙일 시·도 이름
 KAKAO_KEY = st.secrets.get("KAKAO_KEY", "")  # 주변 시설 검색용 (없으면 그 칸만 숨김)
@@ -189,10 +190,10 @@ def places(docs, n):
 PUBLIC_MODE = bool(st.secrets.get("PUBLIC_MODE", False))
 OFFICE = {
     "name": st.secrets.get("OFFICE_NAME", "온누리부동산공인중개사사무소"),
-    "phone": st.secrets.get("OFFICE_PHONE", ""),
-    "addr": st.secrets.get("OFFICE_ADDR", "부산 부산진구 양연로 36 양정포레힐즈스위첸 단지내상가 1-3호"),
-    "ceo": st.secrets.get("OFFICE_CEO", ""),
-    "reg": st.secrets.get("OFFICE_REG", ""),
+    "phone": st.secrets.get("OFFICE_PHONE", "051-866-2009"),
+    "addr": st.secrets.get("OFFICE_ADDR", "부산광역시 부산진구 양연로 36 상가 1-3호 (양정동, 양정포레힐즈스위첸 1단지)"),
+    "ceo": st.secrets.get("OFFICE_CEO", "김애덕"),
+    "reg": st.secrets.get("OFFICE_REG", "26230-2026-00071"),
     "map": st.secrets.get("OFFICE_MAP", "https://naver.me/539d3Fo1"),
 }
 if PUBLIC_MODE:
@@ -204,8 +205,9 @@ if PUBLIC_MODE:
     SHEET_URL = ""     # 손님용은 조건 저장 없음
 
 
-def call_button(label="전화 상담하기"):
+def call_button(label=None):
     if OFFICE["phone"]:
+        label = label or f"전화 상담 {OFFICE['phone']}"
         st.link_button(label, "tel:" + re.sub(r"[^0-9+]", "", OFFICE["phone"]),
                        type="primary", use_container_width=True)
 
@@ -806,14 +808,349 @@ def render_recent(bases):
                "(월세는 월세 금액 비교). 예산 조건은 적용하지 않고 동·단지·평수 조건만 적용해요.")
 
 
+# ── 단지별 실거래 요약 글 (어머니용) ───────────────────
+HOME_APT = st.secrets.get("HOME_APT", "양정포레힐즈")  # 단지 게시용 기본 단지 (이름 일부만 맞아도 됨)
+PUBLIC_URL = st.secrets.get("PUBLIC_URL", "")  # 손님용 앱 주소 (문 앞 포스터 QR에 들어감)
+
+
+def digest_period(option):
+    today = dt.date.today()
+    first = today.replace(day=1)
+    if option == "지난달":
+        start = (first - dt.timedelta(days=1)).replace(day=1)
+        return pd.Timestamp(start), pd.Timestamp(first), f"{start.year}년 {start.month}월"
+    if option == "이번 달":
+        return (pd.Timestamp(first), pd.Timestamp(today) + pd.Timedelta(days=1),
+                f"{today.year}년 {today.month}월({today.day}일까지)")
+    start = today - dt.timedelta(days=30)
+    return (pd.Timestamp(start), pd.Timestamp(today) + pd.Timedelta(days=1),
+            f"최근 30일({start.month}월 {start.day}일~{today.month}월 {today.day}일)")
+
+
+def py_sort(py):
+    return int(re.sub(r"[^0-9]", "", py) or 0)
+
+
+def digest_parts(bases, start, end, apt, show_floor):
+    """한 단지의 거래 종류별 요약 줄. [(종류, 건수, 설명)]"""
+    out = []
+    for kind in ["매매", "전세", "월세"]:
+        base = bases.get(kind)
+        if base is None or base.empty:
+            continue
+        one = base[base["apt"] == apt]
+        cur = one[(one["계약일"] >= start) & (one["계약일"] < end)].sort_values("계약일")
+        if cur.empty:
+            continue
+        before = one[(one["계약일"] < start) & (one["계약일"] >= start - pd.DateOffset(months=3))]
+        pieces = []
+        for py in sorted(cur["평형"].unique(), key=py_sort):
+            g = cur[cur["평형"] == py]
+            if kind == "월세":
+                items = [f"{money(p)}/{int(r)}만" + (f"({f}층)" if show_floor else "")
+                         for p, r, f in zip(g["가격"], g["월세"], g["floor"])]
+                text = f"{py} " + ", ".join(items)
+            elif len(g) <= 2:
+                items = [eok(p) + (f"({f}층)" if show_floor else "") for p, f in zip(g["가격"], g["floor"])]
+                text = f"{py} " + ", ".join(items)
+            else:
+                text = f"{py} {len(g)}건 {eok(g['가격'].min())}~{eok(g['가격'].max())}"
+            notes = []
+            if kind == "전세" and g["ctype"].str.contains("갱신").any():
+                notes.append(f"갱신 {g['ctype'].str.contains('갱신').sum()}건 포함")
+            if kind == "매매" and (g["dealing"] == "직거래").any():
+                notes.append(f"직거래 {(g['dealing'] == '직거래').sum()}건 포함")
+            prev = before[before["평형"] == py]["가격"]
+            if kind != "월세" and len(g) >= 2 and len(prev) >= 2:
+                pct = (g["가격"].median() / prev.median() - 1) * 100
+                if abs(pct) >= 0.5:
+                    notes.append(f"직전 3개월보다 {pct:+.1f}%")
+            if notes:
+                text += " (" + ", ".join(notes) + ")"
+            pieces.append(text)
+        out.append((kind, len(cur), pieces))
+    return out
+
+
+def office_lines():
+    lines = [OFFICE["name"]]
+    if OFFICE["ceo"] or OFFICE["reg"]:
+        lines.append(f"대표 공인중개사 {OFFICE['ceo'] or '[성명]'} · 등록번호 {OFFICE['reg'] or '[등록번호]'}")
+    lines.append(OFFICE["addr"])
+    lines.append(f"전화 {OFFICE['phone'] or '[전화번호]'}")
+    return lines
+
+
+def build_digest(style, bases, start, end, label, apts, area, show_floor):
+    source = (f"※ 국토교통부 실거래가 공개 자료 기준({dt.date.today().month}월 {dt.date.today().day}일 조회). "
+              "계약 후 30일 안에 신고하면 되기 때문에 늦게 신고된 거래는 빠져 있을 수 있어요.\n"
+              "※ 평형은 전용면적 기준이에요.")
+    if style == "단지 게시":
+        apt = apts[0]
+        lines = [f"{apt} {label} 실거래 소식", ""]
+        for kind, n, pieces in digest_parts(bases, start, end, apt, show_floor):
+            lines.append(f"[{kind} {n}건]")
+            lines += [f"  · 전용 {p}" for p in pieces]
+            lines.append("")
+        lines += [source, "", " · ".join([OFFICE["name"], f"전화 {OFFICE['phone'] or '[전화번호]'}"])]
+        return "\n".join(lines)
+
+    totals = {"매매": 0, "전세": 0, "월세": 0}
+    blocks = []
+    for apt in apts:
+        parts = digest_parts(bases, start, end, apt, show_floor)
+        if not parts:
+            continue
+        for kind, n, _ in parts:
+            totals[kind] += n
+        dong = ""
+        for kind in ["매매", "전세", "월세"]:
+            b = bases.get(kind)
+            if b is not None and not b.empty and (b["apt"] == apt).any():
+                dong = b[b["apt"] == apt]["dong"].mode().iat[0]
+                break
+        blocks.append((apt, dong, parts))
+    count_line = " / ".join(f"{k} {v}건" for k, v in totals.items() if v)
+
+    if style == "당근·카톡":
+        lines = [f"[{area}] {label} 아파트 실거래 소식", count_line, ""]
+        for apt, dong, parts in blocks:
+            short = ", ".join(f"{k} {n}건" for k, n, _ in parts)
+            lines.append(f"· {apt}({dong}): {short}")
+            for k, n, pieces in parts:
+                lines.append(f"   {k} {' / '.join(pieces)}")
+        lines += ["", "평형은 전용면적 기준, 국토교통부 실거래가 공개 자료예요.",
+                  "지금 나와 있는 매물과 정확한 시세는 편하게 물어보세요.",
+                  f"{OFFICE['name']} {OFFICE['phone'] or '[전화번호]'}"]
+        return "\n".join(lines)
+
+    # 블로그
+    lines = [f"[{area}] {label} 아파트 실거래 정리", "",
+             f"안녕하세요, {OFFICE['name'].replace('공인중개사사무소', '')}입니다.",
+             f"{label} 신고된 {area} 아파트 실거래를 단지별로 정리했어요. ({count_line})", ""]
+    for apt, dong, parts in blocks:
+        lines.append(f"■ {apt} ({dong})")
+        for kind, n, pieces in parts:
+            lines.append(f"· {kind} {n}건: " + " / ".join(pieces))
+        lines.append("")
+    lines += [source, "", "지금 나와 있는 매물과 자세한 시세는 편하게 문의 주세요.", ""] + office_lines()
+    return "\n".join(lines)
+
+
+# ── 문 앞 포스터 (A4 인쇄용) ──────────────────────────
+def poster_rows(bases, start, end, apt):
+    """한 단지의 평형별 [평형, 매매, 전세, 월세] 칸."""
+    cells = {}
+    for kind in ["매매", "전세", "월세"]:
+        b = bases.get(kind)
+        if b is None or b.empty:
+            continue
+        cur = b[(b["apt"] == apt) & (b["계약일"] >= start) & (b["계약일"] < end)]
+        for py, g in cur.groupby("평형"):
+            n = len(g)
+            if kind == "월세":
+                lo, hi = int(g["월세"].min()), int(g["월세"].max())
+                if n == 1:
+                    text = f"{money(g['가격'].iat[0])} / {lo}만"
+                else:
+                    text = f"월 {lo}만" if lo == hi else f"월 {lo}~{hi}만"
+                    text += f" ({n}건)"
+            else:
+                lo, hi = g["가격"].min(), g["가격"].max()
+                text = eok(lo) if lo == hi else f"{eok(lo)}~{eok(hi)}"
+                if n > 1:
+                    text += f" ({n}건)"
+            cells.setdefault(py, {})[kind] = text
+    return [[py] + [cells[py].get(k, "-") for k in ["매매", "전세", "월세"]]
+            for py in sorted(cells, key=py_sort)]
+
+
+def build_poster(bases, start, end, label, area, home, others):
+    e = html_lib.escape
+    max_rows = 16
+    def table(apts, show_name):
+        body, used = [], 0
+        for apt in apts:
+            rows = poster_rows(bases, start, end, apt)
+            if not rows or used + len(rows) > max_rows:
+                continue
+            used += len(rows)
+            for i, r in enumerate(rows):
+                name = (f'<th scope="row" rowspan="{len(rows)}">{e(apt)}</th>'
+                        if show_name and i == 0 else "")
+                body.append("<tr>" + name + "".join(f"<td>{e(c)}</td>" for c in r) + "</tr>")
+        head = ("<th>단지</th>" if show_name else "") + "<th>전용</th><th>매매</th><th>전세</th><th>월세 (보증금/월)</th>"
+        return f"<table><thead><tr>{head}</tr></thead><tbody>{''.join(body)}</tbody></table>", used
+
+    home_html, _ = table([home], False) if home else ("", 0)
+    others_html, used = table(others, True)
+    today = dt.date.today()
+    office = e(OFFICE["name"])
+    contact = " · ".join(x for x in [
+        f"대표 공인중개사 {e(OFFICE['ceo'])}" if OFFICE["ceo"] else "",
+        f"등록번호 {e(OFFICE['reg'])}" if OFFICE["reg"] else "",
+        f"전화 {e(OFFICE['phone'])}" if OFFICE["phone"] else ""] if x)
+    qr = ""
+    if PUBLIC_URL:
+        try:  # 파이썬 qrcode 라이브러리로 그림을 직접 넣음 (requirements.txt에 qrcode)
+            import qrcode
+            import qrcode.image.svg
+            q = qrcode.QRCode(border=2, error_correction=qrcode.constants.ERROR_CORRECT_M)
+            q.add_data(PUBLIC_URL)
+            q.make(fit=True)
+            svg = q.make_image(image_factory=qrcode.image.svg.SvgPathImage).to_string()
+            svg = svg.decode("utf-8") if isinstance(svg, bytes) else svg
+            svg = svg[svg.find("<svg"):]
+            qr = (f'<div class="qr"><div id="qr" class="svg">{svg}</div>'
+                  f'<p><b>근처 다른 단지 시세가 궁금하면<br>QR을 찍어 보세요</b><br>'
+                  f'<span class="url">{e(PUBLIC_URL)}</span></p></div>')
+        except Exception:
+            qr = ""
+    if PUBLIC_URL and not qr:  # 라이브러리가 없으면 인쇄할 때 브라우저가 QR을 그림
+        qr = f"""<div class="qr"><div id="qr"></div>
+<p><b>근처 다른 단지 시세가 궁금하면<br>QR을 찍어 보세요</b><br><span class="url">{e(PUBLIC_URL)}</span></p></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<script>try{{new QRCode(document.getElementById("qr"),{{text:{PUBLIC_URL!r},width:132,height:132,correctLevel:QRCode.CorrectLevel.M}});}}catch(err){{}}</script>"""
+    home_block = (f'<section class="home"><h2>우리 단지 · {e(home)}</h2>{home_html}</section>'
+                  if home_html and "<td>" in home_html else "")
+    others_block = (f'<section><h2>{e(area)} 근처 단지</h2>{others_html}</section>'
+                    if used else "")
+    return f"""<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><title>{e(label)} 실거래 소식</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;700;900&display=swap">
+<style>
+@page {{ size: A4; margin: 12mm; }}
+* {{ box-sizing: border-box; }}
+body {{ margin: 0; font-family: "Noto Sans KR", "Malgun Gothic", "Apple SD Gothic Neo", sans-serif;
+  color: #1B2427; -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
+.sheet {{ width: 186mm; min-height: 262mm; margin: 0 auto; display: flex; flex-direction: column; gap: 6mm; padding: 4mm 0; }}
+header {{ border-bottom: 1.2mm solid #1E5B5A; padding-bottom: 4mm; }}
+.kicker {{ margin: 0; font-size: 13pt; font-weight: 700; color: #1E5B5A; }}
+h1 {{ margin: 1mm 0 0; font-size: 30pt; font-weight: 900; line-height: 1.15; }}
+h2 {{ margin: 0 0 2.5mm; font-size: 15pt; font-weight: 700; }}
+.home {{ background: #EAF2F1; border-radius: 3mm; padding: 4mm 5mm; }}
+table {{ width: 100%; border-collapse: collapse; font-size: 12pt; font-variant-numeric: tabular-nums; }}
+th, td {{ border-bottom: 0.3mm solid #C7D1D0; padding: 2mm 2.5mm; text-align: left; vertical-align: top; }}
+thead th {{ font-size: 10pt; color: #4A585C; font-weight: 700; border-bottom: 0.5mm solid #1B2427; }}
+tbody th {{ font-weight: 700; width: 30%; }}
+.home td {{ font-size: 13.5pt; }}
+.notes {{ margin: 0; font-size: 9.5pt; line-height: 1.6; color: #4A585C; }}
+footer {{ margin-top: auto; display: flex; align-items: center; justify-content: space-between; gap: 6mm;
+  border-top: 0.5mm solid #1B2427; padding-top: 5mm; }}
+.office b {{ font-size: 15pt; }}
+.office p {{ margin: 1mm 0 0; font-size: 10.5pt; line-height: 1.6; }}
+.qr {{ display: flex; align-items: center; gap: 4mm; }}
+.qr p {{ margin: 0; font-size: 11pt; line-height: 1.5; }}
+.qr .url {{ font-size: 8.5pt; color: #4A585C; word-break: break-all; }}
+#qr img, #qr canvas, #qr svg {{ width: 32mm !important; height: 32mm !important; display: block; }}
+</style></head>
+<body><div class="sheet">
+<header><p class="kicker">{e(area)} 아파트</p><h1>{e(label)} 실거래 소식</h1></header>
+{home_block}
+{others_block}
+<p class="notes">국토교통부 실거래가 공개 자료 기준({today.month}월 {today.day}일 조회). 금액은 계약 금액이며 평형은 전용면적 기준이에요.
+계약 후 30일 안에 신고하면 되기 때문에 늦게 신고된 거래는 빠져 있을 수 있어요. 지금 나와 있는 매물의 가격과는 다를 수 있어요.</p>
+<footer><div class="office"><b>{office}</b><p>{e(OFFICE['addr'])}<br>{contact}</p>
+<p>매물 상담은 편하게 들어오세요.</p></div>{qr}</footer>
+</div></body></html>"""
+
+
+def render_poster(bases, apts, labels, start, end, label, area):
+    home_i = next((i for i, a in enumerate(apts) if HOME_APT and HOME_APT in a), None)
+    options = ["(넣지 않음)"] + apts
+    home = st.selectbox("맨 위에 크게 넣을 우리 단지", options,
+                        index=(home_i + 1) if home_i is not None else 0,
+                        format_func=lambda a: labels.get(a, a), key="pt_home")
+    home = "" if home == "(넣지 않음)" else home
+    rest = [a for a in apts if a != home]
+    others = st.multiselect("아래 표에 넣을 근처 단지 (거래 많은 순)", rest, default=rest[:6],
+                            format_func=labels.get, key="pt_others")
+    if not PUBLIC_URL:
+        st.warning("Secrets에 PUBLIC_URL(손님용 앱 주소)을 넣으면 포스터 아래에 QR 코드가 생겨요.")
+    poster = build_poster(bases, start, end, label, area, home, others)
+    st.download_button("인쇄용 파일 내려받기", poster.encode("utf-8"),
+                       file_name=f"실거래소식_{label.split('(')[0].replace(' ', '')}.html",
+                       mime="text/html", type="primary")
+    st.caption("내려받은 파일을 열고 Ctrl+P(맥은 Cmd+P)로 A4 세로 인쇄하세요. "
+               "인쇄 설정에서 '머리글과 바닥글'은 끄고 '배경 그래픽'은 켜 주세요. "
+               "표에 다 들어가지 않는 단지는 자동으로 빠져요.")
+    import streamlit.components.v1 as components
+    components.html(poster, height=1180, scrolling=True)
+
+
+def render_digest(bases):
+    st.markdown("**단지별 실거래 요약 글** (블로그, 당근, 카톡, 단지 게시판에 붙여넣기용)")
+    c1, c2 = st.columns(2)
+    with c1:
+        period = st.radio("기간", ["지난달", "이번 달", "최근 30일"], horizontal=True, key="dg_period")
+    with c2:
+        style = st.radio("글 종류", ["블로그", "당근·카톡", "단지 게시", "문 앞 포스터"],
+                         horizontal=True, key="dg_style")
+    start, end, label = digest_period(period)
+
+    counts = {}
+    for kind in ["매매", "전세", "월세"]:
+        b = bases.get(kind)
+        if b is None or b.empty:
+            continue
+        cur = b[(b["계약일"] >= start) & (b["계약일"] < end)]
+        for apt, n in cur["apt"].value_counts().items():
+            counts[apt] = counts.get(apt, 0) + n
+    if not counts:
+        st.info(f"{label}에 신고된 거래가 아직 없어요. 다른 기간을 골라 보세요.")
+        return
+    apts = sorted(counts, key=lambda a: -counts[a])
+    labels = {a: f"{a} ({counts[a]}건)" for a in apts}
+
+    if other_code.strip():
+        area = dong_text.strip() or "우리 동네"
+    else:
+        area = f"{gu} {dong_text.strip()}".strip()
+    if style == "문 앞 포스터":
+        render_poster(bases, apts, labels, start, end, label, area)
+        return
+
+    if style == "단지 게시":
+        home = next((i for i, a in enumerate(apts) if HOME_APT and HOME_APT in a), 0)
+        pick = st.selectbox("단지", apts, index=home, format_func=labels.get, key="dg_home")
+        chosen = [pick]
+    else:
+        default = apts[:10] if style == "블로그" else apts[:5]
+        chosen = st.multiselect("넣을 단지 (거래 많은 순)", apts, default=default,
+                                format_func=labels.get, key=f"dg_apts_{style}")
+    show_floor = st.checkbox("층 표시", value=False, key="dg_floor")
+    if not chosen:
+        st.info("넣을 단지를 하나 이상 골라 주세요.")
+        return
+
+    text = build_digest(style, bases, start, end, label, chosen, area, show_floor)
+    try:
+        st.code(text, language=None, wrap_lines=True)
+    except TypeError:
+        st.code(text, language=None)
+    st.caption("오른쪽 위 복사 버튼을 누르면 글 전체가 복사돼요. 숫자는 실거래 자료 그대로이고, "
+               "평가나 추천 문구는 넣지 않았어요. 특정 매물을 함께 소개할 때는 사무소 정보와 "
+               "매물의 소재지·면적·가격 등을 꼭 함께 적어야 해요.")
+    if period == "지난달" and dt.date.today().day < 30:
+        st.caption("지난달 거래는 이달 말까지 신고가 더 들어올 수 있어요. 월말에 한 번 더 뽑으면 더 정확해요.")
+
+
 # ── 화면 그리기 ──────────────────────────────────────
 if choice == "전체":
-    tabs = st.tabs(["최근 거래", "한눈에 비교", "매매", "전세", "월세"])
+    names_ = ["최근 거래", "한눈에 비교", "매매", "전세", "월세"]
+    if not PUBLIC_MODE:
+        names_.insert(1, "요약 글")
+    tabs = st.tabs(names_)
     with tabs[0]:
         render_recent(bases)
-    with tabs[1]:
+    rest = tabs[1:]
+    if not PUBLIC_MODE:
+        with rest[0]:
+            render_digest(bases)
+        rest = rest[1:]
+    with rest[0]:
         render_compare(bases)
-    for tab, kind in zip(tabs[2:], kinds):
+    for tab, kind in zip(rest[1:], kinds):
         with tab:
             render(kind, bases[kind])
 else:
