@@ -938,8 +938,9 @@ def build_digest(style, bases, start, end, label, apts, area, show_floor):
 
 
 # ── 문 앞 포스터 (A4 인쇄용) ──────────────────────────
-def poster_rows(bases, start, end, apt):
-    """한 단지의 평형별 [평형, 매매, 전세, 월세] 칸."""
+def poster_rows(bases, start, end, apt, per_cell=3, with_dates=True):
+    """한 단지의 평형별 [전용 평수, 매매, 전세, 월세]. 각 칸은 [(금액, 날짜)] 목록.
+    with_dates=False면 칸마다 금액 범위와 건수 한 줄만 (예: 6.1억~6.2억 (3건))."""
     cells = {}
     for kind in ["매매", "전세", "월세"]:
         b = bases.get(kind)
@@ -947,43 +948,60 @@ def poster_rows(bases, start, end, apt):
             continue
         cur = b[(b["apt"] == apt) & (b["계약일"] >= start) & (b["계약일"] < end)]
         for py, g in cur.groupby("평형"):
-            n = len(g)
-            if kind == "월세":
-                lo, hi = int(g["월세"].min()), int(g["월세"].max())
-                if n == 1:
-                    text = f"{money(g['가격'].iat[0])} / {lo}만"
+            g = g.sort_values("계약일", ascending=False)
+            if not with_dates:
+                if kind == "월세":
+                    lo, hi = int(g["월세"].min()), int(g["월세"].max())
+                    text = (f"{money(g['가격'].iat[0])} / {lo}만" if len(g) == 1
+                            else (f"월 {lo}만" if lo == hi else f"월 {lo}~{hi}만"))
                 else:
-                    text = f"월 {lo}만" if lo == hi else f"월 {lo}~{hi}만"
-                    text += f" ({n}건)"
-            else:
-                lo, hi = g["가격"].min(), g["가격"].max()
-                text = eok(lo) if lo == hi else f"{eok(lo)}~{eok(hi)}"
-                if n > 1:
-                    text += f" ({n}건)"
-            cells.setdefault(py, {})[kind] = text
-    return [[py] + [cells[py].get(k, "-") for k in ["매매", "전세", "월세"]]
+                    lo, hi = g["가격"].min(), g["가격"].max()
+                    text = eok(lo) if lo == hi else f"{eok(lo)}~{eok(hi)}"
+                if len(g) > 1:
+                    text += f" ({len(g)}건)"
+                cells.setdefault(py, {})[kind] = [(text, "")]
+                continue
+            items = []
+            for _, r in g.head(per_cell).iterrows():
+                amt = (f"{money(r['가격'])} / {int(r['월세'])}만" if kind == "월세" else eok(r["가격"]))
+                items.append((amt, f"{r['계약일'].month}.{r['계약일'].day:02d}"))
+            if len(g) > per_cell:
+                items.append((f"외 {len(g) - per_cell}건", ""))
+            cells.setdefault(py, {})[kind] = items
+    return [[re.sub(r"[^0-9]", "", py)] + [cells[py].get(k, []) for k in ["매매", "전세", "월세"]]
             for py in sorted(cells, key=py_sort)]
 
 
 def build_poster(bases, start, end, label, area, home, others):
     e = html_lib.escape
-    max_rows = 16
-    def table(apts, show_name):
+    max_lines = 16  # 아래 표에 들어갈 줄 수 (A4 한 장 기준)
+
+    def cell(items):
+        if not items:
+            return "<td>-</td>"
+        return "<td>" + "<br>".join(
+            f'{e(amt)} <span class="d">{e(day)}</span>' if day
+            else (f'<span class="d">{e(amt)}</span>' if amt.startswith("외 ") else e(amt))
+            for amt, day in items) + "</td>"
+
+    def table(apts, show_name, limit, with_dates):
         body, used = [], 0
         for apt in apts:
-            rows = poster_rows(bases, start, end, apt)
-            if not rows or used + len(rows) > max_rows:
+            rows = poster_rows(bases, start, end, apt, with_dates=with_dates)
+            lines = sum(max(1, *(len(c) for c in r[1:])) for r in rows)
+            if not rows or used + lines > limit:
                 continue
-            used += len(rows)
+            used += lines
             for i, r in enumerate(rows):
                 name = (f'<th scope="row" rowspan="{len(rows)}">{e(apt)}</th>'
                         if show_name and i == 0 else "")
-                body.append("<tr>" + name + "".join(f"<td>{e(c)}</td>" for c in r) + "</tr>")
-        head = ("<th>단지</th>" if show_name else "") + "<th>전용</th><th>매매</th><th>전세</th><th>월세 (보증금/월)</th>"
+                body.append("<tr>" + name + f"<td>{e(r[0])}</td>" + "".join(cell(c) for c in r[1:]) + "</tr>")
+        head = (("<th>단지</th>" if show_name else "")
+                + "<th>전용(평)</th><th>매매</th><th>전세</th><th>월세 (보증금/월)</th>")
         return f"<table><thead><tr>{head}</tr></thead><tbody>{''.join(body)}</tbody></table>", used
 
-    home_html, _ = table([home], False) if home else ("", 0)
-    others_html, used = table(others, True)
+    home_html, _ = table([home], False, 99, True) if home else ("", 0)  # 우리 단지만 계약일 표시
+    others_html, used = table(others, True, max_lines, False)
     today = dt.date.today()
     office = e(OFFICE["name"])
     contact = " · ".join(x for x in [
@@ -1034,6 +1052,7 @@ th, td {{ border-bottom: 0.3mm solid #C7D1D0; padding: 2mm 2.5mm; text-align: le
 thead th {{ font-size: 10pt; color: #4A585C; font-weight: 700; border-bottom: 0.5mm solid #1B2427; }}
 tbody th {{ font-weight: 700; width: 30%; }}
 .home td {{ font-size: 13.5pt; }}
+td .d {{ font-size: 0.78em; color: #5A676B; margin-left: 1mm; }}
 .notes {{ margin: 0; font-size: 9.5pt; line-height: 1.6; color: #4A585C; }}
 footer {{ margin-top: auto; display: flex; align-items: center; justify-content: space-between; gap: 6mm;
   border-top: 0.5mm solid #1B2427; padding-top: 5mm; }}
@@ -1048,7 +1067,7 @@ footer {{ margin-top: auto; display: flex; align-items: center; justify-content:
 <header><p class="kicker">{e(area)} 아파트</p><h1>{e(label)} 실거래 소식</h1></header>
 {home_block}
 {others_block}
-<p class="notes">국토교통부 실거래가 공개 자료 기준({today.month}월 {today.day}일 조회). 금액은 계약 금액이며 평형은 전용면적 기준이에요.
+<p class="notes">국토교통부 실거래가 공개 자료 기준({today.month}월 {today.day}일 조회). 우리 단지 금액 옆 숫자는 계약일(월.일)이고, 평수는 전용면적 기준이에요.
 계약 후 30일 안에 신고하면 되기 때문에 늦게 신고된 거래는 빠져 있을 수 있어요. 지금 나와 있는 매물의 가격과는 다를 수 있어요.</p>
 <footer><div class="office"><b>{office}</b><p>{e(OFFICE['addr'])}<br>{contact}</p>
 <p>매물 상담은 편하게 들어오세요.</p></div>{qr}</footer>
@@ -1073,7 +1092,7 @@ def render_poster(bases, apts, labels, start, end, label, area):
                        mime="text/html", type="primary")
     st.caption("내려받은 파일을 열고 Ctrl+P(맥은 Cmd+P)로 A4 세로 인쇄하세요. "
                "인쇄 설정에서 '머리글과 바닥글'은 끄고 '배경 그래픽'은 켜 주세요. "
-               "표에 다 들어가지 않는 단지는 자동으로 빠져요.")
+               "우리 단지는 칸마다 최근 3건까지 계약일과 함께 보이고, 근처 단지는 금액 범위와 건수만 보여요. 표에 다 들어가지 않는 단지는 자동으로 빠져요.")
     import streamlit.components.v1 as components
     components.html(poster, height=1180, scrolling=True)
 
